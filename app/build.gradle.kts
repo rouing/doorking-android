@@ -28,8 +28,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 19
-    versionName = "1.0.18"
+    versionCode = 20
+    versionName = "1.0.19"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -172,6 +172,10 @@ dependencies {
   implementation(libs.play.app.update)
   implementation(libs.play.app.update.ktx)
 
+  // Android Auto (IoT category — resident Buzz Me In on car display)
+  implementation(libs.androidx.car.app)
+  implementation(libs.androidx.car.app.projected)
+
   // Networking, Serialization, Persistence & Media
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.okhttp)
@@ -192,6 +196,7 @@ dependencies {
 
   // Local Unit Tests
   testImplementation(libs.junit)
+  testImplementation(libs.androidx.car.app.testing)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.okhttp.mockwebserver)
   testImplementation(libs.turbine)
