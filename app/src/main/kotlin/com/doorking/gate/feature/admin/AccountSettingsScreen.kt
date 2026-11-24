@@ -53,8 +53,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.doorking.gate.core.auth.BiometricUnlockManager
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
+import com.doorking.gate.core.auth.SessionStorage
 import com.doorking.gate.core.auth.ThemeMode
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
@@ -76,6 +78,7 @@ import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.ThemeModeSelector
 import com.doorking.gate.feature.auth.validateNewPassword
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -88,6 +91,7 @@ fun AccountSettingsScreen(
     onSelectTheme: (ThemeMode) -> Unit,
     residentMode: Boolean = false,
     passkeyAuthenticator: PasskeyAuthenticator? = null,
+    sessionStorage: SessionStorage? = null,
     onSwitchToStaff: (() -> Unit)? = null,
     onProfileUpdated: (() -> Unit)? = null,
     onMessage: (String) -> Unit = {},
@@ -738,6 +742,82 @@ fun AccountSettingsScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            if (sessionStorage != null) {
+                item(key = "biometric_lock") {
+                    val stored by sessionStorage.state.collectAsStateWithLifecycle()
+                    val biometricAvailable = remember(context) { BiometricUnlockManager.isAvailable(context) }
+                    SectionCard(
+                        title = "Fingerprint unlock",
+                        tonal = true,
+                        trailing = {
+                            StatusPill(
+                                text = if (stored.biometricLockEnabled) "On" else "Off",
+                                tone = if (stored.biometricLockEnabled) PillTone.Success else PillTone.Neutral,
+                            )
+                        },
+                    ) {
+                        Text(
+                            text = if (biometricAvailable) {
+                                "Prompt immediately for your fingerprint or device screen lock when opening the app. Works with any sign-in method (Google SSO, password, or passkey)."
+                            } else {
+                                "Set up a fingerprint or screen lock in Android Settings to enable biometric unlock."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .toggleable(
+                                    value = stored.biometricLockEnabled,
+                                    enabled = biometricAvailable,
+                                    role = Role.Switch,
+                                    onValueChange = { wantEnable ->
+                                        if (!wantEnable) {
+                                            scope.launch {
+                                                sessionStorage.setBiometricLockEnabled(false)
+                                                onMessage("Fingerprint unlock disabled.")
+                                            }
+                                        } else {
+                                            val activity = BiometricUnlockManager.findFragmentActivity(context)
+                                            if (activity == null) {
+                                                error = "Could not start biometric prompt"
+                                            } else {
+                                                BiometricUnlockManager.authenticate(
+                                                    activity = activity,
+                                                    title = "Enable fingerprint unlock",
+                                                    subtitle = "Confirm your fingerprint to lock Doorking Gate",
+                                                    onSuccess = {
+                                                        scope.launch {
+                                                            sessionStorage.setBiometricLockEnabled(true)
+                                                            onMessage("Fingerprint unlock enabled.")
+                                                        }
+                                                    },
+                                                    onError = { msg -> error = msg },
+                                                )
+                                            }
+                                        }
+                                    },
+                                )
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Require fingerprint to open app",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = stored.biometricLockEnabled,
+                                enabled = biometricAvailable,
+                                onCheckedChange = null,
+                            )
                         }
                     }
                 }

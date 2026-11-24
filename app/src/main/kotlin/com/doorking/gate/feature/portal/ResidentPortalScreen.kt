@@ -262,6 +262,7 @@ fun ResidentPortalScreen(
                     onSelectTheme = onSelectTheme,
                     residentMode = true,
                     passkeyAuthenticator = container.passkeyAuthenticator,
+                    sessionStorage = container.sessionStorage,
                     onSwitchToStaff = onSwitchToStaff,
                     onProfileUpdated = { vm.loadAll(initial = false) },
                     onMessage = { msg -> scope.launch { snackbar.showSnackbar(msg) } },

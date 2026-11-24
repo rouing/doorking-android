@@ -4,6 +4,7 @@ import android.content.Context
 import com.doorking.gate.BuildConfig
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -26,6 +27,7 @@ data class StoredAuthState(
     val sessionToken: String? = null,
     val lastGatePhone: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val biometricLockEnabled: Boolean = false,
     val loaded: Boolean = false,
 )
 
@@ -43,6 +45,7 @@ interface SessionStorage {
     suspend fun setServerUrl(url: String)
     suspend fun setLastGatePhone(phone: String?)
     suspend fun setThemeMode(mode: ThemeMode)
+    suspend fun setBiometricLockEnabled(enabled: Boolean)
 }
 
 fun normalizeServerUrl(raw: String): String {
@@ -77,6 +80,7 @@ class EncryptedSessionStore(
                     sessionToken = decrypted,
                     lastGatePhone = prefs[KEY_LAST_GATE],
                     themeMode = mode,
+                    biometricLockEnabled = prefs[KEY_BIOMETRIC_LOCK] == true,
                     loaded = true,
                 )
             }
@@ -99,8 +103,14 @@ class EncryptedSessionStore(
         dataStore.edit {
             it.remove(KEY_SESSION_TOKEN)
             it.remove(KEY_LAST_GATE)
+            it.remove(KEY_BIOMETRIC_LOCK)
         }
-        _state.value = _state.value.copy(sessionToken = null, lastGatePhone = null, loaded = true)
+        _state.value = _state.value.copy(
+            sessionToken = null,
+            lastGatePhone = null,
+            biometricLockEnabled = false,
+            loaded = true,
+        )
     }
 
     override suspend fun setServerUrl(url: String) {
@@ -121,10 +131,16 @@ class EncryptedSessionStore(
         _state.value = _state.value.copy(themeMode = mode)
     }
 
+    override suspend fun setBiometricLockEnabled(enabled: Boolean) {
+        dataStore.edit { it[KEY_BIOMETRIC_LOCK] = enabled }
+        _state.value = _state.value.copy(biometricLockEnabled = enabled)
+    }
+
     private companion object {
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_TOKEN = stringPreferencesKey("session_token_enc")
         val KEY_LAST_GATE = stringPreferencesKey("last_gate_phone")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        val KEY_BIOMETRIC_LOCK = booleanPreferencesKey("biometric_lock_enabled")
     }
 }

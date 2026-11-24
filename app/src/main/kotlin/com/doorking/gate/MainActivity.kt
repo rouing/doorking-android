@@ -1,47 +1,71 @@
 package com.doorking.gate
 
-import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.os.SystemClock
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Fence
+import androidx.compose.material.icons.rounded.Fingerprint
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.doorking.gate.core.auth.BiometricUnlockManager
 import com.doorking.gate.core.auth.ThemeMode
+import com.doorking.gate.core.auth.shouldRequireBiometricUnlock
+import com.doorking.gate.core.network.AuthEvent
+import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.theme.DoorkingTheme
 import com.doorking.gate.core.update.PlayInAppUpdateController
 import com.doorking.gate.navigation.DoorkingNavRoot
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
-    // MainActivity extends ComponentActivity (no Fragments); play-services-base pulls fragment:1.0.0 transitively.
-    @SuppressLint("InvalidFragmentVersionForActivityResult")
+class MainActivity : FragmentActivity() {
     private val inAppUpdateLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { /* Play InstallStateUpdatedListener tracks download & install progress */ }
 
     private var playUpdateController: PlayInAppUpdateController? = null
+    private val biometricUnlocked = MutableStateFlow(false)
+    private var backgroundedAtMs: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +91,9 @@ class MainActivity : ComponentActivity() {
             setContent {
                 val authState by container.sessionStorage.state.collectAsStateWithLifecycle()
                 val updateReady by updateController.updateReadyToInstall.collectAsStateWithLifecycle()
+                val isUnlocked by biometricUnlocked.collectAsStateWithLifecycle()
+                val scope = rememberCoroutineScope()
+
                 val darkTheme = when (authState.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
@@ -87,10 +114,41 @@ class MainActivity : ComponentActivity() {
                     )
                     onDispose {}
                 }
+
+                // Only mark unlocked once DataStore has loaded; prevents cold-start race where initial
+                // empty StoredAuthState(loaded = false) would prematurely unlock before reading prefs.
+                val hasSession = !authState.sessionToken.isNullOrBlank()
+                LaunchedEffect(authState.loaded, hasSession, authState.biometricLockEnabled) {
+                    if (authState.loaded && (!hasSession || !authState.biometricLockEnabled)) {
+                        biometricUnlocked.value = true
+                    }
+                }
+
+                val locked = shouldRequireBiometricUnlock(
+                    loaded = authState.loaded,
+                    hasSession = hasSession,
+                    biometricLockEnabled = authState.biometricLockEnabled,
+                    alreadyUnlocked = isUnlocked,
+                )
+
                 DoorkingTheme(darkTheme = darkTheme) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         DoorkingNavRoot(container = container)
-                        if (updateReady) {
+                        if (locked) {
+                            BiometricLockOverlay(
+                                activity = this@MainActivity,
+                                onUnlocked = { biometricUnlocked.value = true },
+                                onSignOut = {
+                                    scope.launch {
+                                        runCatching { container.api.signOut() }
+                                        container.sessionStorage.clearSessionToken()
+                                        container.authEvents.emit(AuthEvent.SessionExpired)
+                                        biometricUnlocked.value = true
+                                    }
+                                },
+                            )
+                        }
+                        if (updateReady && !locked) {
                             Snackbar(
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
@@ -126,6 +184,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        val app = application as? DoorkingApp
+        if (app != null && app.startupCrash == null) {
+            val st = app.container.sessionStorage.state.value
+            val bgMs = if (backgroundedAtMs > 0L) SystemClock.elapsedRealtime() - backgroundedAtMs else 0L
+            backgroundedAtMs = 0L
+            if (
+                shouldRequireBiometricUnlock(
+                    loaded = st.loaded,
+                    hasSession = !st.sessionToken.isNullOrBlank(),
+                    biometricLockEnabled = st.biometricLockEnabled,
+                    alreadyUnlocked = biometricUnlocked.value,
+                    backgroundDurationMs = bgMs,
+                )
+            ) {
+                biometricUnlocked.value = false
+            }
+        }
         playUpdateController?.onStart()
     }
 
@@ -135,6 +210,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        backgroundedAtMs = SystemClock.elapsedRealtime()
         playUpdateController?.onStop()
         super.onStop()
     }
@@ -153,6 +229,74 @@ class MainActivity : ComponentActivity() {
             app.container.ssoCallbacks.tryEmit(uri)
         } else if (uri.scheme == "doorking" && uri.host == "invite") {
             app.container.inviteLinks.tryEmit(uri)
+        }
+    }
+}
+
+@Composable
+private fun BiometricLockOverlay(
+    activity: FragmentActivity,
+    onUnlocked: () -> Unit,
+    onSignOut: () -> Unit,
+) {
+    var error by remember { mutableStateOf<String?>(null) }
+    var promptTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(promptTrigger) {
+        error = null
+        BiometricUnlockManager.authenticate(
+            activity = activity,
+            onSuccess = onUnlocked,
+            onError = { msg -> error = msg },
+            onCancelled = { /* User can tap Unlock button */ },
+        )
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Fence,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(56.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Doorking Gate is locked",
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Confirm your fingerprint or device screen lock to continue.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (error != null) {
+                Spacer(Modifier.height(16.dp))
+                ErrorBanner(error!!)
+            }
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = { promptTrigger++ },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.Fingerprint, contentDescription = null)
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("Unlock with fingerprint")
+            }
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onSignOut) {
+                Text("Sign out instead")
+            }
         }
     }
 }

@@ -170,9 +170,10 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.navigationevent.compose)
 
-  // Auth (Credential Manager Passkeys & Chrome Custom Tabs SSO)
+  // Auth (Credential Manager Passkeys, Biometric Fingerprint Unlock & Chrome Custom Tabs SSO)
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services.auth)
+  implementation(libs.androidx.biometric)
   implementation(libs.androidx.browser)
 
   // Google Play In-App Updates (Flexible updates on Internal / Alpha / Production)

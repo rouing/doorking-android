@@ -36,7 +36,12 @@ class FakeSessionStorage(
     }
 
     override suspend fun clearSessionToken() {
-        _state.value = _state.value.copy(sessionToken = null, lastGatePhone = null, loaded = true)
+        _state.value = _state.value.copy(
+            sessionToken = null,
+            lastGatePhone = null,
+            biometricLockEnabled = false,
+            loaded = true,
+        )
     }
 
     override suspend fun setServerUrl(url: String) {
@@ -49,5 +54,9 @@ class FakeSessionStorage(
 
     override suspend fun setThemeMode(mode: ThemeMode) {
         _state.value = _state.value.copy(themeMode = mode)
+    }
+
+    override suspend fun setBiometricLockEnabled(enabled: Boolean) {
+        _state.value = _state.value.copy(biometricLockEnabled = enabled)
     }
 }

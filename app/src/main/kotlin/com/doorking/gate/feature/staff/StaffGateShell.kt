@@ -539,6 +539,7 @@ fun StaffGateShell(
                         themeMode = themeMode,
                         onSelectTheme = onSelectTheme,
                         passkeyAuthenticator = container.passkeyAuthenticator,
+                        sessionStorage = container.sessionStorage,
                         onMessage = ::showMessage,
                         onSignOut = onSignOut,
                     )

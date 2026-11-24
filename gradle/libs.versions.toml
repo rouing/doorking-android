@@ -3,6 +3,7 @@ androidGradlePlugin = "9.5.0"
 androidxCore = "1.18.0"
 androidxLifecycle = "2.10.0"
 androidxActivity = "1.13.0"
+androidxBiometric = "1.4.0-rc01"
 androidxBrowser = "1.8.0"
 androidxCarApp = "1.7.0"
 androidxComposeBom = "2026.11.01"
@@ -35,6 +36,7 @@ turbine = "1.2.0"
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivity" }
+androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "androidxBiometric" }
 androidx-browser = { module = "androidx.browser:browser", version.ref = "androidxBrowser" }
 androidx-car-app = { module = "androidx.car.app:app", version.ref = "androidxCarApp" }
 androidx-car-app-projected = { module = "androidx.car.app:app-projected", version.ref = "androidxCarApp" }
