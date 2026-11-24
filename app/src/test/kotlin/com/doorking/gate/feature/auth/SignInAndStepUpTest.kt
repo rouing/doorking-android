@@ -58,4 +58,17 @@ class SignInAndStepUpTest {
         // Verify cancellation type cleanly exists for UI handling without exceptions.
         assertEquals(PasskeyResult.Cancelled::class, fake::class.let { PasskeyResult.Cancelled::class })
     }
+
+    @Test
+    fun parsesValidHttpsInviteLinksAndRejectsUnsafeSchemes() {
+        val validToken = "a".repeat(43)
+        val ok = parseInviteDeepLink("https://gate.example.com/", validToken, allowLocalHttp = false)
+        assertEquals(ParsedInviteLink("https://gate.example.com", validToken), ok)
+
+        assertNull(parseInviteDeepLink("http://gate.example.com", validToken, allowLocalHttp = false))
+        assertNull(parseInviteDeepLink("https://user:pass@gate.example.com", validToken, allowLocalHttp = false))
+        assertNull(parseInviteDeepLink("https://gate.example.com", "short", allowLocalHttp = false))
+        assertNull(parseInviteDeepLink("javascript:alert(1)", validToken, allowLocalHttp = false))
+        assertNotNull(parseInviteDeepLink("http://10.0.2.2:8080", validToken, allowLocalHttp = true))
+    }
 }

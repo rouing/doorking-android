@@ -118,6 +118,24 @@ data class PasswordResetRequest(
 )
 
 @Serializable
+data class InviteCheckRequest(
+    val token: String,
+)
+
+@Serializable
+data class InviteCheckResponse(
+    val username: String,
+    val email: String = "",
+    val isResident: Boolean = false,
+)
+
+@Serializable
+data class AcceptInviteRequest(
+    val token: String,
+    val password: String,
+)
+
+@Serializable
 data class MessageResponse(
     val ok: Boolean = true,
     val message: String = "",

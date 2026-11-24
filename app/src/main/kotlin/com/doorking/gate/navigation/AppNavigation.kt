@@ -48,6 +48,7 @@ import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.PendingStepUp
 import com.doorking.gate.core.auth.SessionStorage
 import com.doorking.gate.core.auth.ThemeMode
+import com.doorking.gate.core.network.AcceptInviteRequest
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.AuthEvent
@@ -55,6 +56,8 @@ import com.doorking.gate.core.network.AuthEventBus
 import com.doorking.gate.core.network.ChangePasswordRequest
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.GateInfoDto
+import com.doorking.gate.core.network.InviteCheckRequest
+import com.doorking.gate.core.network.InviteCheckResponse
 import com.doorking.gate.core.network.LoginRequest
 import com.doorking.gate.core.network.NativeSsoExchangeRequest
 import com.doorking.gate.core.network.PasskeyAssertionRequest
@@ -66,8 +69,10 @@ import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PasswordOutlinedField
+import com.doorking.gate.feature.auth.AcceptInviteScreen
 import com.doorking.gate.feature.auth.ForcedPasswordChangeScreen
 import com.doorking.gate.feature.auth.SignInScreen
+import com.doorking.gate.feature.auth.parseInviteDeepLink
 import com.doorking.gate.feature.gates.GatePickerScreen
 import com.doorking.gate.feature.portal.ResidentPortalScreen
 import com.doorking.gate.feature.staff.StaffGateShell
@@ -84,6 +89,7 @@ import kotlinx.serialization.Serializable
 sealed interface AppRoute {
     @Serializable data object Splash : AppRoute
     @Serializable data object SignIn : AppRoute
+    @Serializable data class AcceptInvite(val serverUrl: String, val token: String) : AppRoute
     @Serializable data object ForcedPasswordChange : AppRoute
     @Serializable data object GatePicker : AppRoute
     @Serializable data class ResidentPortal(val gatePhone: String) : AppRoute
@@ -106,6 +112,7 @@ class SessionBootstrapViewModel(
     private val authEvents: AuthEventBus,
     private val passkeyAuthenticator: PasskeyAuthenticator,
     private val ssoCallbacks: SharedFlow<Uri>? = null,
+    private val inviteLinks: SharedFlow<Uri>? = null,
     private val onWidgetSync: () -> Unit = {},
     private val onBeforeSignOut: suspend () -> Unit = {},
 ) : ViewModel() {
@@ -137,6 +144,18 @@ class SessionBootstrapViewModel(
         if (ssoCallbacks != null) {
             viewModelScope.launch {
                 ssoCallbacks.collect { uri -> handleSsoCallback(uri) }
+            }
+        }
+        if (inviteLinks != null) {
+            viewModelScope.launch {
+                inviteLinks.collect { uri ->
+                    val parsed = parseInviteDeepLink(uri) ?: return@collect
+                    val currentSession = (_bootstrap.value as? BootstrapState.Ready)?.session
+                    _bootstrap.value = BootstrapState.Ready(
+                        AppRoute.AcceptInvite(parsed.serverUrl, parsed.token),
+                        currentSession,
+                    )
+                }
             }
         }
     }
@@ -275,6 +294,29 @@ class SessionBootstrapViewModel(
         _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, session.gate?.phoneNumber), session)
     }
 
+    suspend fun checkInvite(serverUrl: String, token: String): Result<InviteCheckResponse> = runCatching {
+        sessionStorage.setServerUrl(serverUrl)
+        val res = api.checkInvite(InviteCheckRequest(token = token))
+        if (!res.isSuccessful) error(parseErrorBody(res.errorBody()?.string(), res.code(), "Invalid invitation link"))
+        res.body() ?: error("Empty invitation response")
+    }
+
+    suspend fun acceptInvite(serverUrl: String, token: String, password: String): Result<Unit> = runCatching {
+        sessionStorage.setServerUrl(serverUrl)
+        val res = api.acceptInvite(AcceptInviteRequest(token = token, password = password))
+        if (!res.isSuccessful) error(parseErrorBody(res.errorBody()?.string(), res.code(), "Could not accept invitation"))
+        val sessionToken = res.body()?.sessionToken
+            ?: error("Server did not return a native session token.")
+        sessionStorage.saveSessionToken(sessionToken)
+        val session = api.getSession()
+        _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, session.gate?.phoneNumber), session)
+        onWidgetSync()
+    }
+
+    fun cancelInvite() {
+        refreshSession()
+    }
+
     suspend fun completePasskeyStepUp(activityContext: Context): Result<Boolean> = runCatching {
         val optRes = api.getStepUpOptions()
         if (!optRes.isSuccessful) error(parseErrorBody(optRes.errorBody()?.string(), optRes.code(), "Step-up passkey unavailable"))
@@ -398,6 +440,7 @@ class SessionBootstrapViewModel(
                     authEvents = container.authEvents,
                     passkeyAuthenticator = container.passkeyAuthenticator,
                     ssoCallbacks = container.ssoCallbacks,
+                    inviteLinks = container.inviteLinks,
                     onWidgetSync = { GateWidgetUpdater.enqueueSync(container.appContext) },
                     onBeforeSignOut = {
                         FirebaseHelper.unregisterCurrentDevice(container.appContext, container.api)
@@ -504,6 +547,16 @@ fun DoorkingNavRoot(container: AppContainer) {
                         onSignInPasskey = vm::signInPasskey,
                         onRequestPasswordReset = vm::requestPasswordReset,
                         onStartSso = vm::startSso,
+                    )
+                }
+
+                is AppRoute.AcceptInvite -> NavEntry(key) {
+                    AcceptInviteScreen(
+                        serverUrl = key.serverUrl,
+                        token = key.token,
+                        onCheckInvite = vm::checkInvite,
+                        onAcceptInvite = vm::acceptInvite,
+                        onCancel = vm::cancelInvite,
                     )
                 }
 

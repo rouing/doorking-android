@@ -148,10 +148,11 @@ class MainActivity : ComponentActivity() {
 
     private fun handleSsoCallbackIntent(app: DoorkingApp, intent: Intent?) {
         val uri = intent?.data ?: return
+        if (app.startupCrash != null) return
         if (uri.scheme == "doorking" && uri.host == "sso" && uri.path == "/callback") {
-            if (app.startupCrash == null) {
-                app.container.ssoCallbacks.tryEmit(uri)
-            }
+            app.container.ssoCallbacks.tryEmit(uri)
+        } else if (uri.scheme == "doorking" && uri.host == "invite") {
+            app.container.inviteLinks.tryEmit(uri)
         }
     }
 }

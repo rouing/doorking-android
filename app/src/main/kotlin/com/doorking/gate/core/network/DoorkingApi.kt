@@ -88,6 +88,12 @@ interface DoorkingApi {
     @POST("api/password-reset/request")
     suspend fun requestPasswordReset(@Body body: PasswordResetRequest): Response<MessageResponse>
 
+    @POST("api/invite/check")
+    suspend fun checkInvite(@Body body: InviteCheckRequest): Response<InviteCheckResponse>
+
+    @POST("api/invite")
+    suspend fun acceptInvite(@Body body: AcceptInviteRequest): Response<LoginResponse>
+
     @POST("api/passkey/options")
     suspend fun getPasskeySignInOptions(@Body body: JsonObject = JsonObject(emptyMap())): Response<JsonObject>
 
