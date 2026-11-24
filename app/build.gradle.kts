@@ -140,6 +140,11 @@ tasks.matching { it.name == "publishReleaseBundle" }.configureEach {
   finalizedBy(syncPlayUniversalApk)
 }
 
+// Ensure Play edit is committed before downloading the Play-signed universal APK.
+syncPlayUniversalApk.configure {
+  mustRunAfter(rootProject.tasks.matching { it.name.startsWith("commitEditFor") })
+}
+
 kotlin {
   jvmToolchain(21)
 }
