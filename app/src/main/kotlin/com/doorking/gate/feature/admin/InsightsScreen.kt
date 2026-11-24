@@ -1,5 +1,6 @@
 package com.doorking.gate.feature.admin
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +19,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -187,38 +191,26 @@ fun InsightsScreen(
                     }
                 }
 
-                // Borderless tonal segmented switcher
+                // Borderless Material 3 segmented switcher
                 item(key = "seg") {
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    val noBorder = BorderStroke(0.dp, Color.Transparent)
+                    SingleChoiceSegmentedButtonRow(
                         modifier = Modifier.fillMaxWidth(),
+                        space = 2.dp,
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            tabs.forEachIndexed { idx, label ->
-                                val selected = tabIndex == idx
-                                Surface(
-                                    onClick = { tabIndex = idx },
-                                    shape = CircleShape,
-                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f),
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        textAlign = TextAlign.Center,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
-                                    )
-                                }
-                            }
+                        tabs.forEachIndexed { idx, label ->
+                            SegmentedButton(
+                                selected = tabIndex == idx,
+                                onClick = { tabIndex = idx },
+                                shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabs.size),
+                                border = noBorder,
+                                colors = SegmentedButtonDefaults.colors(
+                                    inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    activeBorderColor = Color.Transparent,
+                                    inactiveBorderColor = Color.Transparent,
+                                ),
+                                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            )
                         }
                     }
                 }

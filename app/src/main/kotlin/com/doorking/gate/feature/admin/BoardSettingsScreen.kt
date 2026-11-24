@@ -1,5 +1,6 @@
 package com.doorking.gate.feature.admin
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +50,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -885,7 +887,11 @@ fun BoardSettingsScreen(
                             item(key = "display-mode") {
                                 BubbleCard {
                                     Text("LCD Message Layout", style = MaterialTheme.typography.titleSmall)
-                                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                    val noBorder = BorderStroke(0.dp, Color.Transparent)
+                                    SingleChoiceSegmentedButtonRow(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        space = 2.dp,
+                                    ) {
                                         DisplayLayoutMode.entries.forEachIndexed { idx, mode ->
                                             SegmentedButton(
                                                 selected = displayMode == mode,
@@ -893,6 +899,12 @@ fun BoardSettingsScreen(
                                                 shape = SegmentedButtonDefaults.itemShape(
                                                     index = idx,
                                                     count = DisplayLayoutMode.entries.size,
+                                                ),
+                                                border = noBorder,
+                                                colors = SegmentedButtonDefaults.colors(
+                                                    inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                    activeBorderColor = Color.Transparent,
+                                                    inactiveBorderColor = Color.Transparent,
                                                 ),
                                                 label = { Text(mode.label, maxLines = 1) },
                                             )
