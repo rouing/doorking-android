@@ -21,10 +21,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -61,6 +64,7 @@ fun TransactionsTab(
     okHttpClient: OkHttpClient,
     onLoadOlder: () -> Unit,
     onRequestSnapshot: (minute: String) -> Unit,
+    onStopSnapshots: () -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     var viewing by remember { mutableStateOf<Pair<TransactionRowDto, List<MediaItemEntry>>?>(null) }
@@ -111,6 +115,55 @@ fun TransactionsTab(
                 onQueryChange = { query = it },
                 placeholder = "Search transactions",
             )
+        }
+
+        val activeRun = state.snapRun
+        if (hasCamera && activeRun?.state == "running") {
+            item(key = "camera-run") {
+                val prog = activeRun.progress
+                val kindLabel = if (isVideoMode) "videos" else "snapshots"
+                val progressText = when {
+                    activeRun.stopping -> "Stopping camera $kindLabel…"
+                    prog != null && prog.frames > 0 -> "Downloading camera $kindLabel (${prog.framesDone}/${prog.frames})…"
+                    prog != null && prog.minutes > 0 -> "Downloading camera $kindLabel (${prog.minutesDone}/${prog.minutes})…"
+                    else -> "Downloading camera $kindLabel…"
+                }
+                BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(progressText, style = MaterialTheme.typography.titleSmall)
+                            if (prog != null && prog.frames > 0) {
+                                LinearProgressIndicator(
+                                    progress = { (prog.framesDone.toFloat() / prog.frames.toFloat()).coerceIn(0f, 1f) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                        Button(
+                            enabled = !activeRun.stopping,
+                            onClick = onStopSnapshots,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Stop")
+                        }
+                    }
+                }
+            }
         }
 
         if (filtered.isEmpty()) {

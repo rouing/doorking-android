@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -16,6 +17,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Fence
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.MoreHoriz
@@ -25,7 +27,10 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Work
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -47,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.ui.components.BubbleCard
+import com.doorking.gate.core.ui.components.HelpIconButton
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.TimePickerField
@@ -496,6 +502,25 @@ fun PlayStoreGateSettingsPreview() {
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Hold Open", style = MaterialTheme.typography.titleLarge)
+                                HelpIconButton(title = "Hold Open", text = "Times when the gate stays open automatically.")
+                            }
+                            Button(
+                                onClick = {},
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                            ) { Text("Clear") }
+                        }
+                    }
+                    item {
                         BubbleCard {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -509,15 +534,32 @@ fun PlayStoreGateSettingsPreview() {
                                 TimePickerField(label = "Start", value = "07:00", onValueChange = {}, modifier = Modifier.weight(1f))
                                 TimePickerField(label = "End", value = "19:00", onValueChange = {}, modifier = Modifier.weight(1f))
                             }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
                                 listOf("S" to false, "M" to true, "T" to true, "W" to true, "T" to true, "F" to true, "S" to false).forEach { (d, on) ->
-                                    FilterChip(selected = on, onClick = {}, label = { Text(d) })
+                                    Surface(
+                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                                        color = if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                                        contentColor = if (on) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f).height(36.dp),
+                                    ) {
+                                        androidx.compose.foundation.layout.Box(contentAlignment = Alignment.Center) {
+                                            Text(d, style = MaterialTheme.typography.labelMedium)
+                                        }
+                                    }
                                 }
                             }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                FilterChip(selected = true, onClick = {}, label = { Text("R0 · Main Gate") })
-                                FilterChip(selected = false, onClick = {}, label = { Text("R1 · Exit Gate") })
-                                FilterChip(selected = true, onClick = {}, label = { Text("R2 · Walk Gate") })
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("Relays", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                FilterChip(selected = true, onClick = {}, label = { Text("R0") })
+                                FilterChip(selected = false, onClick = {}, label = { Text("R1") })
+                                FilterChip(selected = true, onClick = {}, label = { Text("R2") })
                             }
                         }
                     }
@@ -582,7 +624,10 @@ fun PlayStoreTransactionsPreview() {
                             )
                         }
                     },
-                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                    actions = {
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Download, null) }
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) }
+                    },
                 )
             },
             bottomBar = {
@@ -627,11 +672,18 @@ fun PlayStoreResidentsPreview() {
                             )
                         }
                     },
-                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                    actions = {
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Download, null) }
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) }
+                    },
                 )
             },
             floatingActionButton = {
-                FloatingActionButton(onClick = {}) { Icon(Icons.Rounded.Add, null) }
+                ExtendedFloatingActionButton(
+                    onClick = {},
+                    icon = { Icon(Icons.Rounded.Add, null) },
+                    text = { Text("Add resident") },
+                )
             },
             bottomBar = {
                 NavigationBar {
@@ -680,11 +732,18 @@ fun PlayStoreVendorsPreview() {
                             )
                         }
                     },
-                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                    actions = {
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Download, null) }
+                        IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) }
+                    },
                 )
             },
             floatingActionButton = {
-                FloatingActionButton(onClick = {}) { Icon(Icons.Rounded.Add, null) }
+                ExtendedFloatingActionButton(
+                    onClick = {},
+                    icon = { Icon(Icons.Rounded.Add, null) },
+                    text = { Text("Add vendor") },
+                )
             },
             bottomBar = {
                 NavigationBar {

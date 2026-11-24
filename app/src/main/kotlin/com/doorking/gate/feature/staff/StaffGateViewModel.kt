@@ -21,6 +21,7 @@ import com.doorking.gate.core.network.ResidentRowDto
 import com.doorking.gate.core.network.ResidentsReply
 import com.doorking.gate.core.network.SendPreviewDto
 import com.doorking.gate.core.network.SnapshotMinuteDto
+import com.doorking.gate.core.network.SnapshotRunDto
 import com.doorking.gate.core.network.SnapshotRunRequest
 import com.doorking.gate.core.network.TransactionRowDto
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +48,7 @@ data class StaffGateUiState(
     val prefs: GatePrefsDto = GatePrefsDto(),
     val cameras: CameraSettingsDto? = null,
     val snapshots: Map<String, SnapshotMinuteDto> = emptyMap(),
+    val snapRun: SnapshotRunDto? = null,
     val job: JobDto? = null,
     val relays: List<RelayDto> = emptyList(),
     val relayTimers: List<RelayTimerDto> = emptyList(),
@@ -70,6 +72,7 @@ class StaffGateViewModel(
     val uiState: StateFlow<StaffGateUiState> = _uiState.asStateFlow()
 
     private var jobPoll: Job? = null
+    private var snapPoll: Job? = null
 
     init {
         loadAll(initial = true)
@@ -89,9 +92,18 @@ class StaffGateViewModel(
                 val data = runCatching { api.getData(gatePhone) }.getOrNull()
                 val prefs = runCatching { api.getPrefs(gatePhone) }.getOrDefault(GatePrefsDto())
                 val cams = runCatching { api.getCameras(gatePhone).settings }.getOrNull()
-                val snaps = runCatching { api.getSnapshots(gatePhone).snapshots }.getOrDefault(emptyMap())
+                val snapsReply = runCatching { api.getSnapshots(gatePhone) }.getOrNull()
                 val job = runCatching { api.getJob(gatePhone) }.getOrNull()
-                LoadedGateBundle(res, data?.transactions?.rows.orEmpty(), data?.transactions?.next, prefs, cams, snaps, job)
+                LoadedGateBundle(
+                    res,
+                    data?.transactions?.rows.orEmpty(),
+                    data?.transactions?.next,
+                    prefs,
+                    cams,
+                    snapsReply?.snapshots.orEmpty(),
+                    snapsReply?.run,
+                    job,
+                )
             }
                 .onSuccess { b ->
                     _uiState.value = _uiState.value.copy(
@@ -103,9 +115,11 @@ class StaffGateViewModel(
                         prefs = b.prefs,
                         cameras = b.cameras,
                         snapshots = b.snapshots,
+                        snapRun = b.snapRun,
                         job = b.job,
                     )
                     if (b.job?.state == "running") startJobPolling()
+                    if (b.snapRun?.state == "running") startSnapPolling()
                 }
                 .onFailure { err ->
                     _uiState.value = _uiState.value.copy(
@@ -303,18 +317,79 @@ class StaffGateViewModel(
                 if (!res.isSuccessful) error(parseError(res.errorBody()?.string(), res.code(), "Could not fetch clip"))
             }
                 .onSuccess {
-                    _uiState.value = _uiState.value.copy(bannerMessage = "Fetching camera footage for $minute…")
-                    // Poll while the recorder fetches the clip so the playable video appears automatically.
-                    repeat(30) {
-                        delay(2_000L)
-                        val reply = runCatching { api.getSnapshots(gatePhone) }.getOrNull() ?: return@repeat
-                        _uiState.value = _uiState.value.copy(snapshots = reply.snapshots)
-                        if (reply.run?.state != "running") return@onSuccess
-                    }
+                    _uiState.value = _uiState.value.copy(
+                        snapRun = SnapshotRunDto(state = "running", minute = minute),
+                        bannerMessage = "Fetching camera footage for $minute…",
+                    )
+                    startSnapPolling()
                 }
                 .onFailure { err ->
                     _uiState.value = _uiState.value.copy(error = err.message ?: "Camera fetch failed")
                 }
+        }
+    }
+
+    fun requestAllSnapshots() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(error = null)
+            val isVideo = _uiState.value.cameras?.mode == "video"
+            runCatching {
+                val res = api.runSnapshots(gatePhone, SnapshotRunRequest(minute = null))
+                if (!res.isSuccessful) error(parseError(res.errorBody()?.string(), res.code(), "Could not start camera download"))
+            }
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        snapRun = SnapshotRunDto(state = "running"),
+                        bannerMessage = if (isVideo) "Downloading camera videos…" else "Downloading camera snapshots…",
+                    )
+                    startSnapPolling()
+                }
+                .onFailure { err ->
+                    _uiState.value = _uiState.value.copy(error = err.message ?: "Camera download failed")
+                }
+        }
+    }
+
+    fun stopSnapshots() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                error = null,
+                snapRun = _uiState.value.snapRun?.copy(stopping = true),
+            )
+            runCatching {
+                val res = api.stopSnapshots(gatePhone)
+                if (!res.isSuccessful) error(parseError(res.errorBody()?.string(), res.code(), "Could not stop camera download"))
+            }
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(bannerMessage = "Stopping camera download…")
+                    startSnapPolling()
+                }
+                .onFailure { err ->
+                    _uiState.value = _uiState.value.copy(error = err.message ?: "Could not stop camera download")
+                }
+        }
+    }
+
+    private fun startSnapPolling() {
+        snapPoll?.cancel()
+        snapPoll = viewModelScope.launch {
+            while (isActive) {
+                val reply = try {
+                    api.getSnapshots(gatePhone)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    null
+                }
+                if (reply != null) {
+                    _uiState.value = _uiState.value.copy(
+                        snapshots = reply.snapshots,
+                        snapRun = reply.run,
+                    )
+                    if (reply.run?.state != "running") break
+                }
+                delay(2_500L)
+            }
         }
     }
 
@@ -413,13 +488,33 @@ class StaffGateViewModel(
                 throw ce
             } catch (_: Throwable) {
                 null
-            } ?: return@launch
-            val prevState = _uiState.value.job?.state
-            _uiState.value = _uiState.value.copy(job = job)
-            if (job.state == "running") {
-                if (jobPoll?.isActive != true) startJobPolling()
-            } else if (prevState == "running" && job.state == "done") {
-                loadAll(initial = false)
+            }
+            if (job != null) {
+                val prevState = _uiState.value.job?.state
+                _uiState.value = _uiState.value.copy(job = job)
+                if (job.state == "running") {
+                    if (jobPoll?.isActive != true) startJobPolling()
+                } else if (prevState == "running" && job.state == "done") {
+                    loadAll(initial = false)
+                }
+            }
+            if (_uiState.value.cameras != null) {
+                val snapReply = try {
+                    api.getSnapshots(gatePhone)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    null
+                }
+                if (snapReply != null) {
+                    _uiState.value = _uiState.value.copy(
+                        snapshots = snapReply.snapshots,
+                        snapRun = snapReply.run,
+                    )
+                    if (snapReply.run?.state == "running" && snapPoll?.isActive != true) {
+                        startSnapPolling()
+                    }
+                }
             }
         }
     }
@@ -463,6 +558,7 @@ class StaffGateViewModel(
         val prefs: GatePrefsDto,
         val cameras: CameraSettingsDto?,
         val snapshots: Map<String, SnapshotMinuteDto>,
+        val snapRun: SnapshotRunDto?,
         val job: JobDto?,
     )
 

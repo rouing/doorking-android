@@ -182,8 +182,14 @@ interface DoorkingApi {
     @POST("api/gates/{phone}/snapshots/run")
     suspend fun runSnapshots(
         @Path("phone") phone: String,
-        @Body body: SnapshotRunRequest,
+        @Body body: SnapshotRunRequest = SnapshotRunRequest(),
     ): Response<OkResponse>
+
+    @POST("api/gates/{phone}/snapshots/stop")
+    suspend fun stopSnapshots(
+        @Path("phone") phone: String,
+        @Body body: JsonObject = JsonObject(emptyMap()),
+    ): Response<JsonObject>
 
     @GET("api/gates/{phone}/data")
     suspend fun getData(

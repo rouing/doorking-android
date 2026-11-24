@@ -315,7 +315,7 @@ fun CollapsibleSectionCard(
 }
 
 /**
- * 3-way Material 3 segmented theme selector (System / Light / Dark).
+ * Borderless 3-way Material 3 tonal pill selector (System / Light / Dark).
  */
 @Composable
 fun ThemeModeSelector(
@@ -328,14 +328,41 @@ fun ThemeModeSelector(
         ThemeMode.LIGHT to "Light",
         ThemeMode.DARK to "Dark",
     )
-    SingleChoiceSegmentedButtonRow(modifier = modifier.fillMaxWidth()) {
-        options.forEachIndexed { index, (value, label) ->
-            SegmentedButton(
-                selected = mode == value,
-                onClick = { onSelect(value) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                label = { Text(label, maxLines = 1) },
-            )
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            options.forEach { (value, label) ->
+                val selected = mode == value
+                Surface(
+                    onClick = { onSelect(value) },
+                    shape = CircleShape,
+                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
         }
     }
 }

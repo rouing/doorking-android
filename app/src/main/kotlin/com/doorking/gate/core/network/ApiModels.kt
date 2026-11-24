@@ -527,10 +527,21 @@ data class SnapshotMinuteDto(
 )
 
 @Serializable
+data class SnapshotProgressDto(
+    val minutes: Int = 0,
+    val minutesDone: Int = 0,
+    val frames: Int = 0,
+    val framesDone: Int = 0,
+    val current: String? = null,
+)
+
+@Serializable
 data class SnapshotRunDto(
     val state: String = "done",
     val minute: String? = null,
     val error: String? = null,
+    val stopping: Boolean = false,
+    val progress: SnapshotProgressDto? = null,
 )
 
 @Serializable

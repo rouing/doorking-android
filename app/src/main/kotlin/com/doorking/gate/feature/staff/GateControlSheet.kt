@@ -108,6 +108,20 @@ fun GateControlSheetContent(
         else -> "Matches gate" to PillTone.Success
     }
 
+    val jobPill: Pair<String, PillTone>? = state.job?.takeIf {
+        it.state != "idle" && !it.what.isNullOrBlank()
+    }?.let { j ->
+        val whatName = j.what.orEmpty().replaceFirstChar { ch ->
+            if (ch.isLowerCase()) ch.titlecase() else ch.toString()
+        }
+        when (j.state) {
+            "running" -> "$whatName running…" to PillTone.Primary
+            "done" -> "$whatName done" to PillTone.Success
+            "failed" -> "$whatName failed" to PillTone.Error
+            else -> "$whatName ${j.state}" to PillTone.Neutral
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -121,7 +135,15 @@ fun GateControlSheetContent(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Gate connection", style = MaterialTheme.typography.titleLarge)
-            StatusPill(text = wcLabel, tone = wcTone)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (jobPill != null) {
+                    StatusPill(text = jobPill.first, tone = jobPill.second)
+                }
+                StatusPill(text = wcLabel, tone = wcTone)
+            }
         }
 
         if (running) {

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.WorkOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Fence
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.LockOpen
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.Work
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -82,6 +84,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
 import com.doorking.gate.core.auth.ThemeMode
+import com.doorking.gate.core.media.LiveCameraDialog
 import com.doorking.gate.core.media.PdfShareHelper
 import com.doorking.gate.core.network.ResidentRowDto
 import com.doorking.gate.core.network.SessionResponse
@@ -141,6 +144,8 @@ fun StaffGateShell(
     var showGateSheet by remember { mutableStateOf(false) }
     var showRelaysSheet by remember { mutableStateOf(false) }
     var showJobDialog by remember { mutableStateOf(false) }
+    var showActivityExportDialog by remember { mutableStateOf(false) }
+    var showLiveCameraDialog by remember { mutableStateOf(false) }
     var editingResident by remember { mutableStateOf<ResidentRowDto?>(null) }
     var showAddResident by remember { mutableStateOf(false) }
 
@@ -232,6 +237,69 @@ fun StaffGateShell(
         )
     }
 
+    if (showLiveCameraDialog && state.cameras != null && state.cameras!!.channels.isNotEmpty()) {
+        LiveCameraDialog(
+            serverUrl = vm.serverUrl(),
+            gatePhone = gatePhone,
+            channels = state.cameras!!.channels,
+            okHttpClient = container.okHttpClient,
+            onDismiss = { showLiveCameraDialog = false },
+        )
+    }
+
+    if (showActivityExportDialog) {
+        val hasCamera = state.cameras != null
+        val isVideoMode = state.cameras?.mode == "video"
+        val cameraRunning = state.snapRun?.state == "running"
+        AlertDialog(
+            onDismissRequest = { showActivityExportDialog = false },
+            title = { Text("Export or download") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        enabled = state.transactions.isNotEmpty(),
+                        onClick = {
+                            showActivityExportDialog = false
+                            val csv = PdfShareHelper.buildTransactionsCsv(state.transactions)
+                            scope.launch {
+                                PdfShareHelper.shareCsvText(
+                                    context = context,
+                                    filename = "transactions-$gatePhone.csv",
+                                    csvContent = csv,
+                                    subject = "Gate Activity Export",
+                                ).onFailure { err ->
+                                    snackbar.showSnackbar(err.message ?: "CSV export failed")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Export Activity CSV") }
+                    if (hasCamera) {
+                        Button(
+                            enabled = !cameraRunning,
+                            onClick = {
+                                showActivityExportDialog = false
+                                vm.requestAllSnapshots()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                when {
+                                    cameraRunning -> "Camera download already running"
+                                    isVideoMode -> "Download Camera Videos"
+                                    else -> "Download Camera Snapshots"
+                                },
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showActivityExportDialog = false }) { Text("Close") }
+            },
+        )
+    }
+
     if (showGateSheet) {
         val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(onDismissRequest = { showGateSheet = false }, sheetState = sheetState) {
@@ -315,6 +383,49 @@ fun StaffGateShell(
                 },
                 actions = {
                     if (subScreen == null) {
+                        when (tab) {
+                            StaffTab.Residents, StaffTab.Vendors -> {
+                                val isVendor = tab == StaffTab.Vendors
+                                val rowsForTab = state.residentsReply?.rows.orEmpty().filter {
+                                    it.type.equals("Vendor", ignoreCase = true) == isVendor &&
+                                        (it.name.isNotBlank() || it.phone.isNotBlank() || it.entryCode.isNotBlank() || it.cards.isNotEmpty())
+                                }
+                                IconButton(
+                                    enabled = rowsForTab.isNotEmpty(),
+                                    onClick = {
+                                        val csv = PdfShareHelper.buildDirectoryCsv(rowsForTab, isVendor = isVendor)
+                                        val kindName = if (isVendor) "vendors" else "residents"
+                                        scope.launch {
+                                            PdfShareHelper.shareCsvText(
+                                                context = context,
+                                                filename = "$kindName-$gatePhone.csv",
+                                                csvContent = csv,
+                                                subject = if (isVendor) "Vendors Export" else "Residents Export",
+                                            ).onFailure { err ->
+                                                snackbar.showSnackbar(err.message ?: "CSV export failed")
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Download,
+                                        contentDescription = if (isVendor) "Export vendors CSV" else "Export residents CSV",
+                                    )
+                                }
+                            }
+                            StaffTab.Transactions -> {
+                                IconButton(onClick = { showActivityExportDialog = true }) {
+                                    Icon(Icons.Rounded.Download, contentDescription = "Export CSV or download cameras")
+                                }
+                            }
+                            StaffTab.More -> {
+                                if (state.cameras != null && state.cameras!!.channels.isNotEmpty()) {
+                                    IconButton(onClick = { showLiveCameraDialog = true }) {
+                                        Icon(Icons.Rounded.Videocam, contentDescription = "Live camera view")
+                                    }
+                                }
+                            }
+                        }
                         IconButton(onClick = { vm.loadAll(initial = false) }) {
                             Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
                         }
@@ -491,6 +602,7 @@ fun StaffGateShell(
                     okHttpClient = container.okHttpClient,
                     onLoadOlder = vm::loadOlderTransactions,
                     onRequestSnapshot = vm::requestSnapshot,
+                    onStopSnapshots = vm::stopSnapshots,
                 )
 
                 StaffTab.More -> {
@@ -589,10 +701,13 @@ private fun StaffMoreTab(
                         }
                     }
                 }
-                Text("Appearance", style = MaterialTheme.typography.labelLarge)
                 ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
-                OutlinedButton(
+                Button(
                     onClick = onSignOut,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
