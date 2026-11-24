@@ -17,6 +17,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextObfuscationMode
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CalendarMonth
@@ -30,6 +33,8 @@ import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Sensors
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,9 +42,12 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedSecureTextField
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SheetState
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -47,13 +55,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -64,6 +75,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.size
@@ -647,6 +659,92 @@ fun MonthDayPickerField(
             )
         }
     }
+}
+
+/**
+ * Unified Material 3 1.5.0 modal bottom sheet state that expands directly to full content height.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun rememberExpandedModalSheetState(): SheetState = rememberBottomSheetState(
+    initialValue = SheetValue.Hidden,
+    enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+)
+
+/**
+ * Material 3 1.5.0 `OutlinedSecureTextField` wrapper synced with String state, replacing deprecated
+ * `PasswordVisualTransformation` / `VisualTransformation`.
+ */
+@Composable
+fun PasswordOutlinedField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    visible: Boolean? = null,
+    onToggleVisibility: (() -> Unit)? = null,
+    showVisibilityToggle: Boolean = true,
+    digitsOnly: Boolean = false,
+    maxLength: Int? = null,
+    imeAction: ImeAction = ImeAction.Default,
+    onDone: (() -> Unit)? = null,
+) {
+    val state = rememberTextFieldState(initialText = value)
+    var localVisible by remember { mutableStateOf(false) }
+    val isVisible = visible ?: localVisible
+
+    LaunchedEffect(value) {
+        if (state.text.toString() != value) {
+            state.setTextAndPlaceCursorAtEnd(value)
+        }
+    }
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() }.collect { current ->
+            val filtered = if (digitsOnly) current.filter(Char::isDigit) else current
+            val capped = if (maxLength != null) filtered.take(maxLength) else filtered
+            if (capped != current) {
+                state.setTextAndPlaceCursorAtEnd(capped)
+            }
+            if (capped != value) {
+                onValueChange(capped)
+            }
+        }
+    }
+
+    OutlinedSecureTextField(
+        state = state,
+        enabled = enabled,
+        label = { Text(label) },
+        textObfuscationMode = if (isVisible) TextObfuscationMode.Visible else TextObfuscationMode.Hidden,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = if (digitsOnly) KeyboardType.NumberPassword else KeyboardType.Password,
+            autoCorrectEnabled = false,
+            imeAction = imeAction,
+        ),
+        onKeyboardAction = if (onDone != null) {
+            { onDone() }
+        } else {
+            null
+        },
+        trailingIcon = if (showVisibilityToggle) {
+            {
+                IconButton(
+                    onClick = {
+                        if (onToggleVisibility != null) onToggleVisibility() else localVisible = !localVisible
+                    },
+                ) {
+                    Icon(
+                        imageVector = if (isVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                        contentDescription = if (isVisible) "Hide password" else "Show password",
+                    )
+                }
+            }
+        } else {
+            null
+        },
+        modifier = modifier,
+    )
 }
 
 @Composable

@@ -23,12 +23,11 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Brightness6
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Fence
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
@@ -45,7 +44,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -56,8 +54,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -70,9 +66,11 @@ import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,7 +91,7 @@ fun GatePickerScreen(
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     if (showAddSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(
             onDismissRequest = { if (!state.addBusy) showAddSheet = false },
             sheetState = sheetState,
@@ -364,18 +362,17 @@ private fun AddGateSheetContent(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                 modifier = Modifier.weight(1.4f),
             )
-            OutlinedTextField(
+            PasswordOutlinedField(
                 value = masterCode,
-                onValueChange = { if (it.length <= 4) masterCode = it.filter(Char::isDigit) },
-                label = { Text("Master code") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                onValueChange = { masterCode = it },
+                label = "Master code",
+                digitsOnly = true,
+                maxLength = 4,
+                showVisibilityToggle = false,
                 modifier = Modifier.weight(1f),
             )
         }
 
-        var showDksPassword by remember { mutableStateOf(false) }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(
                 value = dksUser,
@@ -385,21 +382,10 @@ private fun AddGateSheetContent(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
                 modifier = Modifier.weight(1f),
             )
-            OutlinedTextField(
+            PasswordOutlinedField(
                 value = dksPassword,
                 onValueChange = { dksPassword = it },
-                label = { Text("DKS password") },
-                singleLine = true,
-                visualTransformation = if (showDksPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                trailingIcon = {
-                    IconButton(onClick = { showDksPassword = !showDksPassword }) {
-                        Icon(
-                            imageVector = if (showDksPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                            contentDescription = if (showDksPassword) "Hide password" else "Show password",
-                        )
-                    }
-                },
+                label = "DKS password",
                 modifier = Modifier.weight(1f),
             )
         }

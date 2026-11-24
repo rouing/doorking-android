@@ -63,7 +63,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -89,6 +88,7 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.ThemeModeSelector
+import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
 import com.doorking.gate.feature.admin.AccountSettingsScreen
 import com.doorking.gate.feature.admin.BoardSection
 import com.doorking.gate.feature.admin.BoardSettingsScreen
@@ -220,7 +220,7 @@ fun StaffGateShell(
     }
 
     if (showGateSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(onDismissRequest = { showGateSheet = false }, sheetState = sheetState) {
             GateControlSheetContent(
                 state = state,
@@ -244,7 +244,7 @@ fun StaffGateShell(
     }
 
     if (showRelaysSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(onDismissRequest = { showRelaysSheet = false }, sheetState = sheetState) {
             LiveRelaysSheetContent(
                 state = state,
@@ -598,7 +598,7 @@ private fun MoreListItem(
     onClick: () -> Unit,
 ) {
     ListItem(
-        headlineContent = { Text(title, style = MaterialTheme.typography.titleSmall) },
+        onClick = onClick,
         supportingContent = if (subtitle.isNotBlank()) {
             { Text(subtitle, style = MaterialTheme.typography.bodySmall) }
         } else {
@@ -607,6 +607,7 @@ private fun MoreListItem(
         leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         trailingContent = { Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-        modifier = Modifier.clickable(onClick = onClick),
-    )
+    ) {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+    }
 }

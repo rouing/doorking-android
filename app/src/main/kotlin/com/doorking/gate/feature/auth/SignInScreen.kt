@@ -24,8 +24,6 @@ import androidx.compose.material.icons.rounded.Fence
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.OpenInBrowser
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,12 +54,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.network.SsoProviderInfo
 import com.doorking.gate.core.ui.components.ErrorBanner
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
@@ -239,26 +236,15 @@ fun SignInScreen(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PasswordOutlinedField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Password") },
-                    singleLine = true,
+                    label = "Password",
                     enabled = !busy,
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(
-                                imageVector = if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                contentDescription = if (showPassword) "Hide password" else "Show password",
-                            )
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Done,
-                    ),
-                    keyboardActions = KeyboardActions(onDone = { submitPassword() }),
+                    visible = showPassword,
+                    onToggleVisibility = { showPassword = !showPassword },
+                    imeAction = ImeAction.Done,
+                    onDone = submitPassword,
                     modifier = Modifier.fillMaxWidth(),
                 )
 

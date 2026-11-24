@@ -54,7 +54,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -85,6 +84,7 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SearchPillBar
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
 import com.doorking.gate.feature.gates.formatUsPhone
 import okhttp3.OkHttpClient
 
@@ -205,7 +205,7 @@ fun DirectoryTab(
     }
 
     if (showAddSheet || editingTarget != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(
             onDismissRequest = {
                 onRequestEdit(null)

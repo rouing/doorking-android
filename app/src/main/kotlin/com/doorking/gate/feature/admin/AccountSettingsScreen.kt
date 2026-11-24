@@ -23,8 +23,6 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.MarkEmailRead
 import androidx.compose.material.icons.rounded.SwapHoriz
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -50,8 +48,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
@@ -66,6 +62,7 @@ import com.doorking.gate.core.network.PasskeyRegistrationRequest
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
@@ -163,7 +160,6 @@ fun AccountSettingsScreen(
     LaunchedEffect(Unit) { load(initial = true) }
 
     if (showAddPasskeyDialog && passkeyAuthenticator != null) {
-        var showPasskeyPw by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { if (!addingPasskey) showAddPasskeyDialog = false },
             title = { Text("Add passkey on this device") },
@@ -181,21 +177,10 @@ fun AccountSettingsScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = addPasskeyPassword,
                         onValueChange = { addPasskeyPassword = it },
-                        label = { Text("Current password (if required)") },
-                        singleLine = true,
-                        visualTransformation = if (showPasskeyPw) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                        trailingIcon = {
-                            IconButton(onClick = { showPasskeyPw = !showPasskeyPw }) {
-                                Icon(
-                                    imageVector = if (showPasskeyPw) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                    contentDescription = if (showPasskeyPw) "Hide password" else "Show password",
-                                )
-                            }
-                        },
+                        label = "Current password (if required)",
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -296,7 +281,6 @@ fun AccountSettingsScreen(
         return
     }
 
-    val pwVisual = if (showPasswords) VisualTransformation.None else PasswordVisualTransformation()
     val hasLinkedUnits = residentMode || profile?.linkedUnits?.isNotEmpty() == true
     val emailTrimmed = email.trim().lowercase()
     val emailChanged = emailTrimmed != profile?.email.orEmpty().lowercase() &&
@@ -371,7 +355,6 @@ fun AccountSettingsScreen(
                             Text("Send confirmation link again")
                         }
                     }
-                    var showEmailPw by remember { mutableStateOf(false) }
                     OutlinedTextField(
                         value = email,
                         onValueChange = { email = it },
@@ -381,21 +364,10 @@ fun AccountSettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     if (emailChanged) {
-                        OutlinedTextField(
+                        PasswordOutlinedField(
                             value = emailPassword,
                             onValueChange = { emailPassword = it },
-                            label = { Text("Current password to confirm email change") },
-                            singleLine = true,
-                            visualTransformation = if (showEmailPw) VisualTransformation.None else PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                            trailingIcon = {
-                                IconButton(onClick = { showEmailPw = !showEmailPw }) {
-                                    Icon(
-                                        imageVector = if (showEmailPw) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                        contentDescription = if (showEmailPw) "Hide password" else "Show password",
-                                    )
-                                }
-                            },
+                            label = "Current password to confirm email change",
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
@@ -604,39 +576,28 @@ fun AccountSettingsScreen(
 
             item(key = "password") {
                 SectionCard(title = "Change Password", tonal = true) {
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = currentPw,
                         onValueChange = { currentPw = it },
-                        label = { Text("Current password") },
-                        singleLine = true,
-                        visualTransformation = pwVisual,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            IconButton(onClick = { showPasswords = !showPasswords }) {
-                                Icon(
-                                    imageVector = if (showPasswords) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                    contentDescription = if (showPasswords) "Hide passwords" else "Show passwords",
-                                )
-                            }
-                        },
+                        label = "Current password",
+                        visible = showPasswords,
+                        onToggleVisibility = { showPasswords = !showPasswords },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = newPw,
                         onValueChange = { newPw = it },
-                        label = { Text("New password (12+ chars)") },
-                        singleLine = true,
-                        visualTransformation = pwVisual,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        label = "New password (12+ chars)",
+                        visible = showPasswords,
+                        showVisibilityToggle = false,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = confirmPw,
                         onValueChange = { confirmPw = it },
-                        label = { Text("Confirm new password") },
-                        singleLine = true,
-                        visualTransformation = pwVisual,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        label = "Confirm new password",
+                        visible = showPasswords,
+                        showVisibilityToggle = false,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Button(

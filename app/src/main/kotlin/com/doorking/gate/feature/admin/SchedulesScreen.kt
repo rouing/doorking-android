@@ -35,7 +35,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +56,7 @@ import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.TimePickerField
+import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
 import kotlinx.coroutines.launch
 
 private val DAY_LABELS = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
@@ -123,7 +123,7 @@ fun SchedulesScreen(
     }
 
     if (showCreate || editing != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberExpandedModalSheetState()
         ModalBottomSheet(
             onDismissRequest = { showCreate = false; editing = null },
             sheetState = sheetState,

@@ -18,14 +18,18 @@ val keystoreProps = Properties().apply {
 
 android {
   namespace = "com.doorking.gate"
-  compileSdk = 37
+  compileSdk {
+    version = release(37) {
+      minorApiLevel = 1
+    }
+  }
 
   defaultConfig {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 17
-    versionName = "1.0.16"
+    versionCode = 18
+    versionName = "1.0.17"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()

@@ -17,8 +17,6 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,11 +35,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.ui.components.ErrorBanner
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.SectionCard
 import kotlinx.coroutines.launch
 
@@ -67,8 +63,6 @@ fun ForcedPasswordChangeScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-
-    val visual = if (showPasswords) VisualTransformation.None else PasswordVisualTransformation()
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
@@ -119,52 +113,35 @@ fun ForcedPasswordChangeScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                PasswordOutlinedField(
                     value = currentPassword,
                     onValueChange = { currentPassword = it },
-                    label = { Text("Current password") },
-                    singleLine = true,
+                    label = "Current password",
                     enabled = !busy,
-                    visualTransformation = visual,
-                    trailingIcon = {
-                        IconButton(onClick = { showPasswords = !showPasswords }) {
-                            Icon(
-                                imageVector = if (showPasswords) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                contentDescription = if (showPasswords) "Hide passwords" else "Show passwords",
-                            )
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Next,
-                    ),
+                    visible = showPasswords,
+                    onToggleVisibility = { showPasswords = !showPasswords },
+                    imeAction = ImeAction.Next,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PasswordOutlinedField(
                     value = newPassword,
                     onValueChange = { newPassword = it },
-                    label = { Text("New password (12+ characters)") },
-                    singleLine = true,
+                    label = "New password (12+ characters)",
                     enabled = !busy,
-                    visualTransformation = visual,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Next,
-                    ),
+                    visible = showPasswords,
+                    showVisibilityToggle = false,
+                    imeAction = ImeAction.Next,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PasswordOutlinedField(
                     value = confirmPassword,
                     onValueChange = { confirmPassword = it },
-                    label = { Text("Confirm new password") },
-                    singleLine = true,
+                    label = "Confirm new password",
                     enabled = !busy,
-                    visualTransformation = visual,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Done,
-                    ),
-                    keyboardActions = KeyboardActions(onDone = { submit() }),
+                    visible = showPasswords,
+                    showVisibilityToggle = false,
+                    imeAction = ImeAction.Done,
+                    onDone = submit,
                     modifier = Modifier.fillMaxWidth(),
                 )
 

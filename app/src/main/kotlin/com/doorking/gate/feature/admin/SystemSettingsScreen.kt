@@ -18,8 +18,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,8 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
@@ -72,6 +68,7 @@ import com.doorking.gate.core.network.WebhookInfoDto
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
@@ -297,7 +294,6 @@ fun SystemSettingsScreen(
         if (isAdmin) {
             // 1. Gate Login
             item(key = "login") {
-                var showDksPassword by remember { mutableStateOf(false) }
                 CollapsibleSection("Gate Login (DKS Cloud)", openLogin, { openLogin = !openLogin }) {
                     OutlinedTextField(
                         value = dksUser,
@@ -307,30 +303,19 @@ fun SystemSettingsScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = dksPassword,
                         onValueChange = { dksPassword = it },
-                        label = { Text(if (login?.dksPasswordSet == true) "DKS password (blank keeps saved)" else "DKS password") },
-                        singleLine = true,
-                        visualTransformation = if (showDksPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                        trailingIcon = {
-                            IconButton(onClick = { showDksPassword = !showDksPassword }) {
-                                Icon(
-                                    imageVector = if (showDksPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                    contentDescription = if (showDksPassword) "Hide password" else "Show password",
-                                )
-                            }
-                        },
+                        label = if (login?.dksPasswordSet == true) "DKS password (blank keeps saved)" else "DKS password",
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    PasswordOutlinedField(
                         value = masterCode,
-                        onValueChange = { masterCode = it.filter(Char::isDigit).take(4) },
-                        label = { Text("Master code (4 digits, blank keeps saved)") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, autoCorrectEnabled = false),
+                        onValueChange = { masterCode = it },
+                        label = "Master code (4 digits, blank keeps saved)",
+                        digitsOnly = true,
+                        maxLength = 4,
+                        showVisibilityToggle = false,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Button(
