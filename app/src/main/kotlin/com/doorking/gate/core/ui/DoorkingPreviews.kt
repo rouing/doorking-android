@@ -1,11 +1,18 @@
 package com.doorking.gate.core.ui
 
 import android.content.res.Configuration
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.rounded.Add
@@ -19,19 +26,30 @@ import androidx.compose.material.icons.rounded.Work
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import com.doorking.gate.core.ui.components.BubbleCard
+import com.doorking.gate.core.ui.components.PillTone
+import com.doorking.gate.core.ui.components.StatusPill
+import com.doorking.gate.core.ui.components.TimePickerField
 import com.doorking.gate.core.network.BuzzRelayLabelDto
 import com.doorking.gate.core.network.CameraChannelDto
 import com.doorking.gate.core.network.CameraSettingsDto
@@ -63,6 +81,7 @@ import com.doorking.gate.feature.staff.GateControlSheetContent
 import com.doorking.gate.feature.staff.LiveRelaysSheetContent
 import com.doorking.gate.feature.staff.StaffGateUiState
 import com.doorking.gate.feature.staff.TransactionsTab
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
 
 private val sampleStaffState = StaffGateUiState(
@@ -99,6 +118,32 @@ private val sampleStaffState = StaffGateUiState(
                 phone = "5550193",
                 entryCode = "6150",
                 hidden = true,
+            ),
+            ResidentRowDto(
+                directoryCode = "901",
+                name = "Metro Waste",
+                type = "Vendor",
+                hidden = true,
+                entryCode = "8142",
+                securityLevel = JsonPrimitive(2),
+                note = "Tue/Fri morning pickup",
+            ),
+            ResidentRowDto(
+                directoryCode = "902",
+                name = "ClearView Pool",
+                type = "Vendor",
+                hidden = true,
+                entryCode = "5294",
+                cards = listOf("10810"),
+                securityLevel = JsonPrimitive(1),
+            ),
+            ResidentRowDto(
+                directoryCode = "905",
+                name = "Parcel Courier",
+                type = "Vendor",
+                hidden = true,
+                entryCode = "3719",
+                securityLevel = JsonPrimitive(1),
             ),
         ),
         cache = WorkingCopyCacheDto(exists = true, edited = true),
@@ -387,3 +432,391 @@ fun GateControlSheetPreview() {
         }
     }
 }
+
+// --- Google Play Store 9:16 Phone Screenshots (100% synthetic sample data) ---
+
+@Preview(name = "Play01 Login", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreLoginPreview() {
+    SignInLightPreview()
+}
+
+@Preview(name = "Play02 Resident", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreResidentPreview() {
+    ResidentPortalPreview()
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Preview(name = "Play03 Gate Settings", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreGateSettingsPreview() {
+    DoorkingTheme(darkTheme = false, dynamicColor = false) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = {}) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back") }
+                    },
+                    title = {
+                        Column {
+                            Text("Board Settings")
+                            Text(
+                                "Oakridge Condos",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                )
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.People, null) }, label = { Text("Residents") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Work, null) }, label = { Text("Vendors") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.AutoMirrored.Rounded.ListAlt, null) }, label = { Text("Activity") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Fence, null) }, label = { Text("Gate") })
+                    NavigationBarItem(selected = true, onClick = {}, icon = { Icon(Icons.Rounded.MoreHoriz, null) }, label = { Text("More") })
+                }
+            },
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .consumeWindowInsets(padding)
+                    .padding(padding),
+            ) {
+                SecondaryScrollableTabRow(selectedTabIndex = 3, edgePadding = 12.dp) {
+                    listOf("Facility", "Holidays", "Security", "Hold Open", "Display", "APB", "System").forEachIndexed { idx, label ->
+                        Tab(selected = idx == 3, onClick = {}, text = { Text(label) })
+                    }
+                }
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item {
+                        BubbleCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                StatusPill("Row #1 · Main Gate", tone = PillTone.Primary)
+                                StatusPill("Active", tone = PillTone.Success)
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TimePickerField(label = "Start", value = "07:00", onValueChange = {}, modifier = Modifier.weight(1f))
+                                TimePickerField(label = "End", value = "19:00", onValueChange = {}, modifier = Modifier.weight(1f))
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                listOf("S" to false, "M" to true, "T" to true, "W" to true, "T" to true, "F" to true, "S" to false).forEach { (d, on) ->
+                                    FilterChip(selected = on, onClick = {}, label = { Text(d) })
+                                }
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(selected = true, onClick = {}, label = { Text("R0 · Main Gate") })
+                                FilterChip(selected = false, onClick = {}, label = { Text("R1 · Exit Gate") })
+                                FilterChip(selected = true, onClick = {}, label = { Text("R2 · Walk Gate") })
+                            }
+                        }
+                    }
+                    item {
+                        BubbleCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("Anti-Pass Back Mode", style = MaterialTheme.typography.titleSmall)
+                                StatusPill("Synced", tone = PillTone.Neutral)
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("Off", "Passive", "Active", "Trap").forEach { mode ->
+                                    FilterChip(selected = mode == "Passive", onClick = {}, label = { Text(mode) })
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        BubbleCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("Scheduled Re-Sync All", style = MaterialTheme.typography.titleSmall)
+                                Switch(checked = true, onCheckedChange = {})
+                            }
+                            OutlinedTextField(
+                                value = "1:30",
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Talk time (m:ss)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Preview(name = "Play04 Transactions", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreTransactionsPreview() {
+    DoorkingTheme(darkTheme = false, dynamicColor = false) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Oakridge Condos")
+                            Text(
+                                "Gate activity · 24h",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                )
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.People, null) }, label = { Text("Residents") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Work, null) }, label = { Text("Vendors") })
+                    NavigationBarItem(selected = true, onClick = {}, icon = { Icon(Icons.AutoMirrored.Rounded.ListAlt, null) }, label = { Text("Activity") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Fence, null) }, label = { Text("Gate") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.MoreHoriz, null) }, label = { Text("More") })
+                }
+            },
+        ) { padding ->
+            Surface(modifier = Modifier.fillMaxSize().consumeWindowInsets(padding).padding(padding)) {
+                TransactionsTab(
+                    state = sampleStaffState,
+                    serverUrl = "https://gate.example.com",
+                    gatePhone = "2145550100",
+                    okHttpClient = OkHttpClient(),
+                    onLoadOlder = {},
+                    onRequestSnapshot = {},
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Preview(name = "Play05 Residents", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreResidentsPreview() {
+    DoorkingTheme(darkTheme = false, dynamicColor = false) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Oakridge Condos")
+                            Text(
+                                "Unsent working-copy changes",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                )
+            },
+            floatingActionButton = {
+                FloatingActionButton(onClick = {}) { Icon(Icons.Rounded.Add, null) }
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(selected = true, onClick = {}, icon = { Icon(Icons.Rounded.People, null) }, label = { Text("Residents") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Work, null) }, label = { Text("Vendors") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.AutoMirrored.Rounded.ListAlt, null) }, label = { Text("Activity") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { BadgedBox(badge = { Badge() }) { Icon(Icons.Rounded.Fence, null) } }, label = { Text("Gate") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.MoreHoriz, null) }, label = { Text("More") })
+                }
+            },
+        ) { padding ->
+            Surface(modifier = Modifier.fillMaxSize().consumeWindowInsets(padding).padding(padding)) {
+                DirectoryTab(
+                    state = sampleStaffState,
+                    isVendor = false,
+                    canEdit = true,
+                    editingTarget = null,
+                    showAddSheet = false,
+                    onRequestEdit = {},
+                    onDismissAdd = {},
+                    onSave = { _, _, _, _, _, _, _, _ -> },
+                    onDelete = {},
+                    onShareWelcomePdf = {},
+                    onDecideConflict = { _, _, _ -> },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Preview(name = "Play06 Vendors", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreVendorsPreview() {
+    DoorkingTheme(darkTheme = false, dynamicColor = false) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Oakridge Condos")
+                            Text(
+                                "Vendor access codes",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                )
+            },
+            floatingActionButton = {
+                FloatingActionButton(onClick = {}) { Icon(Icons.Rounded.Add, null) }
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.People, null) }, label = { Text("Residents") })
+                    NavigationBarItem(selected = true, onClick = {}, icon = { Icon(Icons.Rounded.Work, null) }, label = { Text("Vendors") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.AutoMirrored.Rounded.ListAlt, null) }, label = { Text("Activity") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Fence, null) }, label = { Text("Gate") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.MoreHoriz, null) }, label = { Text("More") })
+                }
+            },
+        ) { padding ->
+            Surface(modifier = Modifier.fillMaxSize().consumeWindowInsets(padding).padding(padding)) {
+                DirectoryTab(
+                    state = sampleStaffState,
+                    isVendor = true,
+                    canEdit = true,
+                    editingTarget = null,
+                    showAddSheet = false,
+                    onRequestEdit = {},
+                    onDismissAdd = {},
+                    onSave = { _, _, _, _, _, _, _, _ -> },
+                    onDelete = {},
+                    onShareWelcomePdf = {},
+                    onDecideConflict = { _, _, _ -> },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Preview(name = "Play07 Live Relays", showSystemUi = true, device = "spec:width=412dp,height=732dp,dpi=420")
+@Composable
+fun PlayStoreRelaysPreview() {
+    DoorkingTheme(darkTheme = false, dynamicColor = false) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = {}) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back") }
+                    },
+                    title = {
+                        Column {
+                            Text("Live Relays")
+                            Text(
+                                "Oakridge Condos",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    actions = { IconButton(onClick = {}) { Icon(Icons.Rounded.Refresh, null) } },
+                )
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.People, null) }, label = { Text("Residents") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.Work, null) }, label = { Text("Vendors") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.AutoMirrored.Rounded.ListAlt, null) }, label = { Text("Activity") })
+                    NavigationBarItem(selected = true, onClick = {}, icon = { Icon(Icons.Rounded.Fence, null) }, label = { Text("Gate") })
+                    NavigationBarItem(selected = false, onClick = {}, icon = { Icon(Icons.Rounded.MoreHoriz, null) }, label = { Text("More") })
+                }
+            },
+        ) { padding ->
+            Surface(modifier = Modifier.fillMaxSize().consumeWindowInsets(padding).padding(padding)) {
+                LiveRelaysSheetContent(
+                    state = sampleStaffState,
+                    isAdmin = true,
+                    onRefresh = {},
+                    onToggleRelay = { _, _, _ -> },
+                    onCancelTimer = {},
+                    onClose = {},
+                )
+            }
+        }
+    }
+}
+
+// --- 7-inch Tablet Screenshots (9:16, 900x1600 px) ---
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in1() = PlayStoreLoginPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in2() = PlayStoreResidentPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in3() = PlayStoreGateSettingsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in4() = PlayStoreTransactionsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in5() = PlayStoreResidentsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in6() = PlayStoreVendorsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=600dp,height=1067dp,dpi=240")
+@Composable
+fun PlayStore7in7() = PlayStoreRelaysPreview()
+
+// --- 10-inch Tablet Screenshots (9:16, 1200x2133 px — each side >= 1080 px) ---
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in1() = PlayStoreLoginPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in2() = PlayStoreResidentPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in3() = PlayStoreGateSettingsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in4() = PlayStoreTransactionsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in5() = PlayStoreResidentsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in6() = PlayStoreVendorsPreview()
+
+@Preview(showSystemUi = true, device = "spec:width=800dp,height=1422dp,dpi=240")
+@Composable
+fun PlayStore10in7() = PlayStoreRelaysPreview()

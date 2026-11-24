@@ -28,8 +28,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 18
-    versionName = "1.0.17"
+    versionCode = 19
+    versionName = "1.0.18"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -92,7 +92,9 @@ play {
   if (!credsPath.isNullOrBlank()) {
     serviceAccountCredentials.set(file(credsPath))
   }
-  track.set("internal")
+  track.set((findProperty("playTrack") as? String)?.trim()?.ifBlank { null } ?: "internal")
+  fromTrack.set("internal")
+  promoteTrack.set("alpha")
   defaultToAppBundles.set(true)
   releaseStatus.set(ReleaseStatus.COMPLETED)
   resolutionStrategy.set(ResolutionStrategy.AUTO)
@@ -165,6 +167,10 @@ dependencies {
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services.auth)
   implementation(libs.androidx.browser)
+
+  // Google Play In-App Updates (Flexible updates on Internal / Alpha / Production)
+  implementation(libs.play.app.update)
+  implementation(libs.play.app.update.ktx)
 
   // Networking, Serialization, Persistence & Media
   implementation(libs.kotlinx.serialization.json)
