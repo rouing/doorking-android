@@ -93,6 +93,19 @@ private val DIR_MP4_EXT_REGEX = Regex("\\.mp4$", RegexOption.IGNORE_CASE)
 private fun normalizeDirCode(code: String): String =
     code.trim().trimStart('0').ifEmpty { code.trim() }
 
+/**
+ * Hides reserved directory code 000 and completely empty placeholder slots (matching Web UI's `!isEmptySlot`).
+ */
+fun isVisibleDirectoryRow(row: ResidentRowDto): Boolean {
+    val trimmed = row.directoryCode.trim()
+    if (trimmed.isNotEmpty() && trimmed.all { it == '0' }) return false
+    return row.name.isNotBlank() ||
+        row.phone.isNotBlank() ||
+        row.entryCode.isNotBlank() ||
+        row.cards.isNotEmpty() ||
+        !row.note.isNullOrBlank()
+}
+
 private enum class DirectorySort(val label: String) {
     Name("Name"),
     Unit("Unit"),
@@ -157,7 +170,7 @@ fun DirectoryTab(
 
     val allRows = state.residentsReply?.rows.orEmpty()
     val kindRows = remember(allRows, isVendor) {
-        allRows.filter { (it.type.equals("Vendor", ignoreCase = true)) == isVendor }
+        allRows.filter { isVisibleDirectoryRow(it) && (it.type.equals("Vendor", ignoreCase = true)) == isVendor }
     }
     val filtered = remember(kindRows, query, sort) {
         val q = query.trim().lowercase()

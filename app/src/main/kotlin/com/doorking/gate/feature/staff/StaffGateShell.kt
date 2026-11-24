@@ -392,8 +392,7 @@ fun StaffGateShell(
                             StaffTab.Residents, StaffTab.Vendors -> {
                                 val isVendor = tab == StaffTab.Vendors
                                 val rowsForTab = state.residentsReply?.rows.orEmpty().filter {
-                                    it.type.equals("Vendor", ignoreCase = true) == isVendor &&
-                                        (it.name.isNotBlank() || it.phone.isNotBlank() || it.entryCode.isNotBlank() || it.cards.isNotEmpty())
+                                    isVisibleDirectoryRow(it) && it.type.equals("Vendor", ignoreCase = true) == isVendor
                                 }
                                 IconButton(
                                     enabled = rowsForTab.isNotEmpty(),

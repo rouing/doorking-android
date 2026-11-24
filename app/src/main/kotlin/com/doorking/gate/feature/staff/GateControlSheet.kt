@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -13,6 +14,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ListAlt
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
@@ -34,6 +37,7 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -320,49 +324,170 @@ fun SendPreviewDialog(
     )
 }
 
+data class JobProgressInfo(
+    val percent: Int?,
+    val statusLabel: String,
+    val isComplete: Boolean = false,
+)
+
+private val LOG_PERCENT_REGEX = Regex("""(\d{1,3})\s*%""")
+private val LOG_TIMESTAMP_PREFIX = Regex("""^\s*\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?\s+""", RegexOption.IGNORE_CASE)
+
+/**
+ * Analyzes DKS Cloud job log lines to extract progress percentage and current phase.
+ * "Session Complete: Success" (or state == "done") resolves to 100%.
+ */
+fun parseJobProgress(job: JobDto): JobProgressInfo {
+    val lines = job.log
+    val hasSessionSuccess = lines.any { it.contains("Session Complete: Success", ignoreCase = true) }
+    if (job.state == "done" || hasSessionSuccess) {
+        return JobProgressInfo(percent = 100, statusLabel = "Session Complete: Success", isComplete = true)
+    }
+
+    var latestPercent: Int? = null
+    var latestStage: String? = null
+    for (line in lines.asReversed()) {
+        val m = LOG_PERCENT_REGEX.find(line)
+        if (m != null) {
+            latestPercent = m.groupValues[1].toIntOrNull()?.coerceIn(0, 100)
+            val cleaned = line.replace(LOG_TIMESTAMP_PREFIX, "").trim()
+            latestStage = cleaned.substringBefore(':').trim().ifBlank { cleaned }
+            break
+        }
+    }
+
+    if (job.state == "failed") {
+        return JobProgressInfo(
+            percent = latestPercent,
+            statusLabel = job.error?.takeIf { it.isNotBlank() } ?: "Job failed",
+            isComplete = false,
+        )
+    }
+
+    val fallbackStage = latestStage ?: lines.lastOrNull { it.isNotBlank() }
+        ?.replace(LOG_TIMESTAMP_PREFIX, "")
+        ?.lineSequence()
+        ?.firstOrNull()
+        ?.trim()
+        ?.take(60)
+        ?.ifBlank { null }
+        ?: "Connecting to gate…"
+
+    return JobProgressInfo(
+        percent = latestPercent,
+        statusLabel = fallbackStage,
+        isComplete = false,
+    )
+}
+
+private fun formatJobTitle(what: String?): String = when (what?.lowercase()) {
+    "transactions" -> "Pulling transactions"
+    "residents" -> "Pulling residents"
+    "send" -> "Sending to gate"
+    null, "" -> "Gate job"
+    else -> "Gate job (${what})"
+}
+
 @Composable
 fun JobProgressDialog(
     job: JobDto,
     onRefresh: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
-    val tone = when (job.state) {
-        "running" -> PillTone.Primary
-        "done" -> PillTone.Success
-        "failed" -> PillTone.Error
-        else -> PillTone.Neutral
-    }
+    val progressInfo = remember(job.state, job.log, job.error) { parseJobProgress(job) }
+    var showRawLog by remember { mutableStateOf(false) }
     val logScroll = rememberScrollState()
-    LaunchedEffect(job.log.size, job.state) {
-        logScroll.animateScrollTo(logScroll.maxValue)
+    LaunchedEffect(job.log.size, showRawLog) {
+        if (showRawLog) logScroll.animateScrollTo(logScroll.maxValue)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Gate job (${job.what.orEmpty()})")
-                StatusPill(text = job.state.uppercase(), tone = tone)
-            }
+            Text(
+                text = if (progressInfo.isComplete) {
+                    when (job.what?.lowercase()) {
+                        "transactions" -> "Transactions pulled"
+                        "residents" -> "Residents pulled"
+                        "send" -> "Sent to gate"
+                        else -> "Gate job complete"
+                    }
+                } else {
+                    formatJobTitle(job.what)
+                },
+            )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (!job.error.isNullOrBlank()) ErrorBanner(job.error)
-                Surface(
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = progressInfo.statusLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (progressInfo.percent != null) {
+                            Text(
+                                text = "${progressInfo.percent}%",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (progressInfo.isComplete) {
+                                    LocalDoorkingColors.current.success
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                },
+                            )
+                        }
+                    }
+                    if (progressInfo.percent != null) {
+                        LinearProgressIndicator(
+                            progress = { (progressInfo.percent / 100f).coerceIn(0f, 1f) },
+                            color = if (progressInfo.isComplete) {
+                                LocalDoorkingColors.current.success
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else if (job.state == "running") {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+
+                FilledTonalButton(
+                    onClick = { showRawLog = !showRawLog },
                     modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shape = MaterialTheme.shapes.small,
                 ) {
-                    Text(
-                        text = job.log.takeLast(25).joinToString("\n").ifBlank { "Waiting for log output…" },
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        modifier = Modifier
-                            .verticalScroll(logScroll)
-                            .padding(12.dp),
+                    Icon(
+                        imageVector = if (showRawLog) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
                     )
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text(if (showRawLog) "Hide raw log" else "Show raw log")
+                }
+
+                if (showRawLog) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = MaterialTheme.shapes.small,
+                    ) {
+                        Text(
+                            text = job.log.takeLast(50).joinToString("\n").ifBlank { "Waiting for log output…" },
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier
+                                .verticalScroll(logScroll)
+                                .padding(12.dp),
+                        )
+                    }
                 }
             }
         },

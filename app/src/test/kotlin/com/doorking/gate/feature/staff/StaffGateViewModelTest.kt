@@ -2,6 +2,9 @@ package com.doorking.gate.feature.staff
 
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
+import com.doorking.gate.core.network.JobDto
+import com.doorking.gate.core.network.ResidentRowDto
+import com.doorking.gate.core.network.TransactionRowDto
 import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -110,5 +113,86 @@ class StaffGateViewModelTest {
         assertEquals(4, generated.length)
         assertFalse(generated in taken)
         assertFalse(StaffGateViewModel.isWeakEntryCode(generated))
+    }
+
+    @Test
+    fun parsesJobProgressPercentAndSessionCompleteSuccess() {
+        val connecting = parseJobProgress(
+            JobDto(state = "running", what = "transactions", log = listOf("5:24:07 PM  Request reply: OK", "5:24:07 PM  Processing")),
+        )
+        assertEquals(null, connecting.percent)
+        assertFalse(connecting.isComplete)
+
+        val mid = parseJobProgress(
+            JobDto(
+                state = "running",
+                what = "transactions",
+                log = listOf("5:24:17 PM  Receive Tran: 10% complete", "5:24:59 PM  Receive Tran: 76% complete"),
+            ),
+        )
+        assertEquals(76, mid.percent)
+        assertEquals("Receive Tran", mid.statusLabel)
+        assertFalse(mid.isComplete)
+
+        val completeByLog = parseJobProgress(
+            JobDto(
+                state = "running",
+                what = "transactions",
+                log = listOf("5:25:10 PM  Receive Tran: 94% complete", "5:25:15 PM  Session Complete: Success"),
+            ),
+        )
+        assertEquals(100, completeByLog.percent)
+        assertTrue(completeByLog.isComplete)
+    }
+
+    @Test
+    fun formatsFailedEntryCodeHeadlineWithAttemptedCode() {
+        val failedCode = TransactionRowDto(
+            ts = 1795542936000L,
+            eventType = "Entry Code",
+            access = "Deny",
+            name = "",
+            directoryCode = "",
+            number = "9876",
+        )
+        assertEquals("Entry Code · #9876", formatTransactionHeadline(failedCode))
+
+        val residentEntry = TransactionRowDto(
+            ts = 1795542936000L,
+            eventType = "Entry Code",
+            access = "Admit",
+            name = "Alice",
+            directoryCode = "101",
+            number = "4821",
+        )
+        assertEquals("Alice · #101", formatTransactionHeadline(residentEntry))
+    }
+
+    @Test
+    fun hidesMatchingHoldBeginAndHoldEndForPortalOpenOnly() {
+        val baseTs = 1795542936000L
+        val rows = listOf(
+            // Portal Open with matching Hold End + Hold Begin at same time -> hides both Hold rows
+            TransactionRowDto(ts = baseTs, minute = "20261124-1155", eventType = "Portal Open", access = "Admit", name = "Cody", directoryCode = "701", relay = "Entry", source = "portal"),
+            TransactionRowDto(ts = baseTs - 36_000L, minute = "20261124-1155", eventType = "Hold End", access = "Rels", relay = "Entry"),
+            TransactionRowDto(ts = baseTs - 36_000L, minute = "20261124-1155", eventType = "Hold Begin", access = "Hold", relay = "Entry"),
+            // Standalone manual 30-min Hold Open -> stays visible
+            TransactionRowDto(ts = baseTs - 3_600_000L, minute = "20261124-1055", eventType = "Hold End", access = "Rels", relay = "Entry"),
+            TransactionRowDto(ts = baseTs - 5_400_000L, minute = "20261124-1025", eventType = "Hold Begin", access = "Hold", relay = "Entry"),
+        )
+        val filtered = hidePortalHoldNoise(rows)
+        assertEquals(3, filtered.size)
+        assertEquals("Portal Open", filtered[0].eventType)
+        assertEquals("Hold End", filtered[1].eventType)
+        assertEquals("Hold Begin", filtered[2].eventType)
+    }
+
+    @Test
+    fun hidesReservedUnit000AndEmptyDirectorySlots() {
+        assertFalse(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "000", name = "", type = "Resident", hidden = true)))
+        assertFalse(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "000", name = "System", type = "Resident")))
+        assertFalse(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "102", name = "", phone = "", entryCode = "", cards = emptyList())))
+        assertTrue(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "101", name = "Alice", type = "Resident")))
+        assertTrue(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "020", name = "", cards = listOf("19917"))))
     }
 }
