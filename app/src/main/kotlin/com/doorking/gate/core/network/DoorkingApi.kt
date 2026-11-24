@@ -71,6 +71,17 @@ interface DoorkingApi {
     @POST("api/me/fcm/test")
     suspend fun sendTestFcm(@Body body: JsonObject = JsonObject(emptyMap())): Response<TestFcmReply>
 
+    // --- Web Push Subscriptions (browsers, desktop PWAs) ---
+
+    @GET("api/me/push")
+    suspend fun getWebPushSubscriptions(): WebPushReply
+
+    @DELETE("api/me/push/{id}")
+    suspend fun deleteWebPushSubscription(@Path("id") id: String): Response<WebPushReply>
+
+    @POST("api/me/push/test")
+    suspend fun sendTestAllPush(@Body body: JsonObject = JsonObject(emptyMap())): Response<TestPushReply>
+
     @PUT("api/me/password")
     suspend fun changePassword(@Body body: ChangePasswordRequest): Response<OkResponse>
 

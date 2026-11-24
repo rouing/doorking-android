@@ -619,7 +619,6 @@ fun StaffGateShell(
                         onSwitchGate = onSwitchGate,
                         onOpenResidentPortal = if (hasOwnPortalUnit) onOpenResidentPortal else null,
                         onSelectTheme = onSelectTheme,
-                        onSignOut = onSignOut,
                     )
                 }
             }
@@ -636,7 +635,6 @@ private fun StaffMoreTab(
     onSwitchGate: () -> Unit,
     onOpenResidentPortal: (() -> Unit)?,
     onSelectTheme: (ThemeMode) -> Unit,
-    onSignOut: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -702,18 +700,6 @@ private fun StaffMoreTab(
                     }
                 }
                 ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
-                Button(
-                    onClick = onSignOut,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
-                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                    Text("Sign out")
-                }
             }
         }
     }

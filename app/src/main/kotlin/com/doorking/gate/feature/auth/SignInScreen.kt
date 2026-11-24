@@ -169,7 +169,7 @@ fun SignInScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (showServerEditor) {
-                SectionCard(title = "DoorKing server") {
+                SectionCard(title = "DoorKing server", tonal = true) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -212,6 +212,7 @@ fun SignInScreen(
 
             SectionCard(
                 title = "Sign in",
+                tonal = true,
                 trailing = {
                     StatusPill(
                         text = serverUrl.removePrefix("https://").removePrefix("http://"),
@@ -296,7 +297,7 @@ fun SignInScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     providers.forEach { provider ->
-                        OutlinedButton(
+                        FilledTonalButton(
                             enabled = !busy,
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {

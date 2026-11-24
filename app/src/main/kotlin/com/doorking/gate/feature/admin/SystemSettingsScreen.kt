@@ -350,7 +350,7 @@ fun SystemSettingsScreen(
                             "resident" -> PillTone.Success
                             else -> PillTone.Neutral
                         }
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -430,7 +430,7 @@ fun SystemSettingsScreen(
                         )
                     }
                     requests.filter { it.status == "pending" }.forEach { req ->
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Text("Unit ${req.directoryCode} · ${req.kind}", style = MaterialTheme.typography.titleSmall)
                             if (req.note.isNotBlank()) Text(req.note, style = MaterialTheme.typography.bodySmall)
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -458,7 +458,7 @@ fun SystemSettingsScreen(
                         }
                     }
                     reports.filter { it.status == "open" }.forEach { rep ->
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Text("Suspicious · Unit ${rep.directoryCode}", style = MaterialTheme.typography.titleSmall)
                             Text(rep.txSummary, style = MaterialTheme.typography.bodySmall)
                             if (rep.note.isNotBlank()) Text(rep.note, style = MaterialTheme.typography.bodySmall)
@@ -486,7 +486,7 @@ fun SystemSettingsScreen(
                             "failed", "rate_limited" -> PillTone.Error
                             else -> PillTone.Neutral
                         }
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(e.username ?: e.identifier, style = MaterialTheme.typography.titleSmall)
                                 StatusPill(e.outcome, tone = tone)
@@ -527,7 +527,7 @@ fun SystemSettingsScreen(
                         }
                     }
                     apiKeys.forEach { k ->
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -618,7 +618,7 @@ fun SystemSettingsScreen(
             item(key = "webhooks") {
                 CollapsibleSection("Webhooks (${webhooks.size})", openWebhooks, { openWebhooks = !openWebhooks }) {
                     webhooks.forEach { w ->
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -679,7 +679,7 @@ fun SystemSettingsScreen(
                 helpText = "Friendly names for ranges of card or clicker numbers (for example 00001–00500 = Residents). Shown as the Event Type on the Activity feed.",
             ) {
                 devices.forEachIndexed { i, row ->
-                    BubbleCard {
+                    BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -784,6 +784,7 @@ private fun CollapsibleSection(
         title = title,
         expanded = expanded,
         onToggle = onToggle,
+        tonal = true,
         helpText = helpText,
     ) {
         content()

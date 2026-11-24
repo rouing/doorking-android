@@ -107,7 +107,7 @@ fun ForcedPasswordChangeScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SectionCard(title = "Update password for $username") {
+            SectionCard(title = "Update password for $username", tonal = true) {
                 Text(
                     text = "Your account requires a new password of at least $MIN_PASSWORD_LENGTH characters before you can open any gate.",
                     style = MaterialTheme.typography.bodyMedium,

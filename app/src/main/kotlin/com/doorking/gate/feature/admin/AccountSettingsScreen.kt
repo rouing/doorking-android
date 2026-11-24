@@ -65,6 +65,7 @@ import com.doorking.gate.core.network.MeProfileDto
 import com.doorking.gate.core.network.PasskeyInfoDto
 import com.doorking.gate.core.network.PasskeyRegistrationRequest
 import com.doorking.gate.core.network.RegisterFcmRequest
+import com.doorking.gate.core.network.WebPushSubDto
 import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
@@ -98,6 +99,7 @@ fun AccountSettingsScreen(
     var passkeys by remember { mutableStateOf<List<PasskeyInfoDto>>(emptyList()) }
     var fcmServerEnabled by remember { mutableStateOf(false) }
     var fcmTokens by remember { mutableStateOf<List<FcmTokenInfoDto>>(emptyList()) }
+    var webPushSubs by remember { mutableStateOf<List<WebPushSubDto>>(emptyList()) }
     var fcmBusy by remember { mutableStateOf(false) }
     var notificationPermGranted by remember { mutableStateOf(false) }
     var deletePasskeyTarget by remember { mutableStateOf<PasskeyInfoDto?>(null) }
@@ -135,15 +137,23 @@ fun AccountSettingsScreen(
                 val me = api.getMe()
                 val pks = runCatching { api.listPasskeys().passkeys }.getOrDefault(emptyList())
                 val fcm = runCatching { api.getFcmTokens() }.getOrNull()
-                Triple(me, pks, fcm)
+                val webPush = runCatching { api.getWebPushSubscriptions().subscriptions }.getOrDefault(emptyList())
+                listOf(me, pks, fcm, webPush)
             }
-                .onSuccess { (me, pks, fcm) ->
+                .onSuccess { results ->
+                    val me = results[0] as MeProfileDto
+                    @Suppress("UNCHECKED_CAST")
+                    val pks = results[1] as List<PasskeyInfoDto>
+                    val fcm = results[2] as com.doorking.gate.core.network.FcmTokensReply?
+                    @Suppress("UNCHECKED_CAST")
+                    val webPush = results[3] as List<WebPushSubDto>
                     profile = me
                     passkeys = pks
                     if (fcm != null) {
                         fcmServerEnabled = fcm.enabled
                         fcmTokens = fcm.tokens
                     }
+                    webPushSubs = webPush
                     email = me.pendingEmail.ifBlank { me.email }
                     phone = me.phone
                     notifyAccess = me.notifyAccess
@@ -356,17 +366,6 @@ fun AccountSettingsScreen(
         ) {
             if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
 
-            item(key = "appearance") {
-                SectionCard(title = "Appearance", tonal = true) {
-                    Text(
-                        text = "Signed in as ${profile?.username.orEmpty()}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
-                }
-            }
-
             item(key = "email") {
                 SectionCard(
                     title = "Email",
@@ -569,33 +568,34 @@ fun AccountSettingsScreen(
 
             item(key = "push_fcm") {
                 val firebaseReady = FirebaseHelper.isAvailable(context)
+                val totalDevices = fcmTokens.size + webPushSubs.size
                 SectionCard(
                     title = "Push notifications",
                     tonal = true,
                     trailing = {
                         when {
-                            !firebaseReady -> StatusPill("Unavailable", tone = PillTone.Neutral)
+                            totalDevices > 0 ->
+                                StatusPill("$totalDevices device${if (totalDevices == 1) "" else "s"}", tone = PillTone.Success)
+                            !firebaseReady && !fcmServerEnabled -> StatusPill("Off", tone = PillTone.Neutral)
                             !fcmServerEnabled -> StatusPill("Server off", tone = PillTone.Warning)
-                            notificationPermGranted && fcmTokens.isNotEmpty() ->
-                                StatusPill("${fcmTokens.size} device${if (fcmTokens.size == 1) "" else "s"}", tone = PillTone.Success)
                             else -> StatusPill("Off", tone = PillTone.Neutral)
                         }
                     },
                 ) {
                     Text(
                         text = when {
-                            !firebaseReady -> "This build does not include Firebase Messaging configuration."
-                            !fcmServerEnabled -> "Your server does not have Firebase push configured yet."
-                            else -> "Receive instant Android alerts for gate events, code changes, and account notices."
+                            !firebaseReady && totalDevices == 0 -> "This build does not include Firebase Messaging configuration."
+                            !fcmServerEnabled && totalDevices == 0 -> "Your server does not have Android push configured yet."
+                            else -> "Receive instant alerts across your Android app, browsers, and desktop PWAs."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (firebaseReady && fcmServerEnabled) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (firebaseReady && fcmServerEnabled) {
                             FilledTonalButton(
                                 enabled = !fcmBusy,
                                 onClick = {
@@ -611,81 +611,131 @@ fun AccountSettingsScreen(
                                 Spacer(Modifier.width(6.dp))
                                 Text(if (notificationPermGranted && fcmTokens.isNotEmpty()) "Re-sync device" else "Enable on device")
                             }
-                            if (fcmTokens.isNotEmpty()) {
-                                Button(
+                        }
+                        if (totalDevices > 0) {
+                            Button(
+                                enabled = !fcmBusy,
+                                onClick = {
+                                    fcmBusy = true
+                                    error = null
+                                    scope.launch {
+                                        runCatching {
+                                            val res = api.sendTestAllPush()
+                                            if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Test push failed"))
+                                            res.body()
+                                        }
+                                            .onSuccess { reply ->
+                                                fcmBusy = false
+                                                val sent = reply?.sent ?: 0
+                                                val failed = reply?.failed ?: 0
+                                                onMessage(
+                                                    if (sent > 0) "Test notification sent to $sent device${if (sent == 1) "" else "s"}."
+                                                    else "Test push did not deliver ($failed failed).",
+                                                )
+                                            }
+                                            .onFailure { err ->
+                                                fcmBusy = false
+                                                error = err.message ?: "Test push failed"
+                                            }
+                                    }
+                                },
+                            ) { Text("Test") }
+                        }
+                    }
+                    fcmTokens.forEach { dev ->
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(dev.label, style = MaterialTheme.typography.titleSmall)
+                                        StatusPill("Android", tone = PillTone.Primary)
+                                    }
+                                    Text(
+                                        dev.lastUsedAt?.let { "Last delivered ${it.take(16).replace('T', ' ')}" } ?: "Registered",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                IconButton(
                                     enabled = !fcmBusy,
                                     onClick = {
                                         fcmBusy = true
-                                        error = null
                                         scope.launch {
                                             runCatching {
-                                                val res = api.sendTestFcm()
-                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Test push failed"))
+                                                val res = api.deleteFcmToken(dev.id)
+                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove device"))
                                                 res.body()
                                             }
                                                 .onSuccess { reply ->
                                                     fcmBusy = false
-                                                    val sent = reply?.sent ?: 0
-                                                    val failed = reply?.failed ?: 0
-                                                    onMessage(
-                                                        if (sent > 0) "Test notification sent to $sent device${if (sent == 1) "" else "s"}."
-                                                        else "Test push did not deliver ($failed failed).",
-                                                    )
+                                                    if (reply != null) fcmTokens = reply.tokens
+                                                    onMessage("Removed ${dev.label} from push notifications.")
                                                 }
                                                 .onFailure { err ->
                                                     fcmBusy = false
-                                                    error = err.message ?: "Test push failed"
+                                                    error = err.message ?: "Could not remove device"
                                                 }
                                         }
                                     },
-                                ) { Text("Test") }
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Delete,
+                                        contentDescription = "Remove ${dev.label}",
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                }
                             }
                         }
-                        if (fcmTokens.isNotEmpty()) {
-                            fcmTokens.forEach { dev ->
-                                BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(dev.label, style = MaterialTheme.typography.titleSmall)
-                                            Text(
-                                                dev.lastUsedAt?.let { "Last delivered $it" } ?: "Registered",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        IconButton(
-                                            enabled = !fcmBusy,
-                                            onClick = {
-                                                fcmBusy = true
-                                                scope.launch {
-                                                    runCatching {
-                                                        val res = api.deleteFcmToken(dev.id)
-                                                        if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove device"))
-                                                        res.body()
-                                                    }
-                                                        .onSuccess { reply ->
-                                                            fcmBusy = false
-                                                            if (reply != null) fcmTokens = reply.tokens
-                                                            onMessage("Removed ${dev.label} from push notifications.")
-                                                        }
-                                                        .onFailure { err ->
-                                                            fcmBusy = false
-                                                            error = err.message ?: "Could not remove device"
-                                                        }
-                                                }
-                                            },
-                                        ) {
-                                            Icon(
-                                                Icons.Rounded.Delete,
-                                                contentDescription = "Remove ${dev.label}",
-                                                tint = MaterialTheme.colorScheme.error,
-                                            )
-                                        }
+                    }
+                    webPushSubs.forEach { sub ->
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(sub.label, style = MaterialTheme.typography.titleSmall)
+                                        StatusPill("Browser", tone = PillTone.Neutral)
                                     }
+                                    Text(
+                                        sub.lastUsedAt?.let { "Last delivered ${it.take(16).replace('T', ' ')}" } ?: "Registered",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                IconButton(
+                                    enabled = !fcmBusy,
+                                    onClick = {
+                                        fcmBusy = true
+                                        scope.launch {
+                                            runCatching {
+                                                val res = api.deleteWebPushSubscription(sub.id)
+                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove browser"))
+                                                res.body()
+                                            }
+                                                .onSuccess { reply ->
+                                                    fcmBusy = false
+                                                    if (reply != null) webPushSubs = reply.subscriptions
+                                                    onMessage("Removed ${sub.label} from push notifications.")
+                                                }
+                                                .onFailure { err ->
+                                                    fcmBusy = false
+                                                    error = err.message ?: "Could not remove browser"
+                                                }
+                                        }
+                                    },
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Delete,
+                                        contentDescription = "Remove ${sub.label}",
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
                                 }
                             }
                         }

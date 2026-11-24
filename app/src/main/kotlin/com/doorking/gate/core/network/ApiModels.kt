@@ -972,3 +972,24 @@ data class TestFcmReply(
     val failed: Int = 0,
     val removed: Int = 0,
 )
+
+@Serializable
+data class WebPushSubDto(
+    val id: String,
+    val label: String = "Browser",
+    val createdAt: String = "",
+    val lastUsedAt: String? = null,
+)
+
+@Serializable
+data class WebPushReply(
+    val publicKey: String = "",
+    val subscriptions: List<WebPushSubDto> = emptyList(),
+)
+
+@Serializable
+data class TestPushReply(
+    val sent: Int = 0,
+    val failed: Int = 0,
+    val removed: Int = 0,
+)
