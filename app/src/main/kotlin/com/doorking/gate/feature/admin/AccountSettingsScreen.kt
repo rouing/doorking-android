@@ -370,6 +370,17 @@ fun AccountSettingsScreen(
         ) {
             if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
 
+            item(key = "appearance") {
+                SectionCard(title = "Appearance", tonal = true) {
+                    Text(
+                        text = "Signed in as ${profile?.username.orEmpty()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
+                }
+            }
+
             item(key = "email") {
                 SectionCard(
                     title = "Email",

@@ -92,7 +92,6 @@ import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
-import com.doorking.gate.core.ui.components.ThemeModeSelector
 import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
 import com.doorking.gate.feature.admin.AccountSettingsScreen
 import com.doorking.gate.feature.admin.BoardSection
@@ -614,12 +613,10 @@ fun StaffGateShell(
                             } == true)
                     StaffMoreTab(
                         session = session,
-                        themeMode = themeMode,
                         onNavigate = { subScreen = it },
                         onOpenLiveRelays = { showRelaysSheet = true },
                         onSwitchGate = onSwitchGate,
                         onOpenResidentPortal = if (hasOwnPortalUnit) onOpenResidentPortal else null,
-                        onSelectTheme = onSelectTheme,
                     )
                 }
             }
@@ -630,12 +627,10 @@ fun StaffGateShell(
 @Composable
 private fun StaffMoreTab(
     session: SessionResponse?,
-    themeMode: ThemeMode,
     onNavigate: (MoreSubScreen) -> Unit,
     onOpenLiveRelays: () -> Unit,
     onSwitchGate: () -> Unit,
     onOpenResidentPortal: (() -> Unit)?,
-    onSelectTheme: (ThemeMode) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -700,7 +695,6 @@ private fun StaffMoreTab(
                         }
                     }
                 }
-                ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
             }
         }
     }
