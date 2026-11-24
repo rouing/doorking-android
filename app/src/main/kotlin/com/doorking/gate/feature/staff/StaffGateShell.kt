@@ -76,6 +76,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
@@ -201,6 +203,16 @@ fun StaffGateShell(
         vm.clearBanner()
     }
 
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        vm.refreshJob()
+    }
+
+    LaunchedEffect(showGateSheet, showJobDialog) {
+        if (showGateSheet || showJobDialog) {
+            vm.refreshJob()
+        }
+    }
+
     if (state.sendPreview != null) {
         SendPreviewDialog(
             preview = state.sendPreview!!,
@@ -215,6 +227,7 @@ fun StaffGateShell(
     if (showJobDialog && state.job != null) {
         JobProgressDialog(
             job = state.job!!,
+            onRefresh = vm::refreshJob,
             onDismiss = { showJobDialog = false },
         )
     }

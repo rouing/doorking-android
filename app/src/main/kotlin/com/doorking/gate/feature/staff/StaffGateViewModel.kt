@@ -24,6 +24,7 @@ import com.doorking.gate.core.network.SnapshotMinuteDto
 import com.doorking.gate.core.network.SnapshotRunRequest
 import com.doorking.gate.core.network.TransactionRowDto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -400,15 +401,45 @@ class StaffGateViewModel(
         _uiState.value = _uiState.value.copy(bannerMessage = null, error = null)
     }
 
+    /**
+     * Fetches the latest gate job snapshot immediately and ensures live polling is active whenever
+     * a job is running (e.g. after returning from background or opening the Gate/Progress dialog).
+     */
+    fun refreshJob() {
+        viewModelScope.launch {
+            val job = try {
+                api.getJob(gatePhone)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                null
+            } ?: return@launch
+            val prevState = _uiState.value.job?.state
+            _uiState.value = _uiState.value.copy(job = job)
+            if (job.state == "running") {
+                if (jobPoll?.isActive != true) startJobPolling()
+            } else if (prevState == "running" && job.state == "done") {
+                loadAll(initial = false)
+            }
+        }
+    }
+
     private fun startJobPolling() {
         jobPoll?.cancel()
         jobPoll = viewModelScope.launch {
             while (isActive) {
-                val job = runCatching { api.getJob(gatePhone) }.getOrNull()
+                val job = try {
+                    api.getJob(gatePhone)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    null
+                }
                 if (job != null) {
+                    val prevState = _uiState.value.job?.state
                     _uiState.value = _uiState.value.copy(job = job)
                     if (job.state != "running") {
-                        if (job.state == "done") loadAll(initial = false)
+                        if (job.state == "done" && prevState == "running") loadAll(initial = false)
                         break
                     }
                 }

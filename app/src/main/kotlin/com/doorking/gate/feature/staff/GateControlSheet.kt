@@ -301,6 +301,7 @@ fun SendPreviewDialog(
 @Composable
 fun JobProgressDialog(
     job: JobDto,
+    onRefresh: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val tone = when (job.state) {
@@ -308,6 +309,10 @@ fun JobProgressDialog(
         "done" -> PillTone.Success
         "failed" -> PillTone.Error
         else -> PillTone.Neutral
+    }
+    val logScroll = rememberScrollState()
+    LaunchedEffect(job.log.size, job.state) {
+        logScroll.animateScrollTo(logScroll.maxValue)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -333,7 +338,7 @@ fun JobProgressDialog(
                         text = job.log.takeLast(25).joinToString("\n").ifBlank { "Waiting for log output…" },
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         modifier = Modifier
-                            .verticalScroll(rememberScrollState())
+                            .verticalScroll(logScroll)
                             .padding(12.dp),
                     )
                 }
@@ -341,6 +346,9 @@ fun JobProgressDialog(
         },
         confirmButton = {
             Button(onClick = onDismiss) { Text("Close") }
+        },
+        dismissButton = {
+            TextButton(onClick = onRefresh) { Text("Refresh") }
         },
     )
 }
