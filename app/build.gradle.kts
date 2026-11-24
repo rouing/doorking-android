@@ -1,9 +1,12 @@
+import com.github.triplet.gradle.androidpublisher.ReleaseStatus
+import com.github.triplet.gradle.androidpublisher.ResolutionStrategy
 import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
   alias(libs.plugins.kotlin.serialization)
+  alias(libs.plugins.play.publisher)
 }
 
 val keystorePropsFile = rootProject.file("keystore.properties")
@@ -21,8 +24,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 36
-    versionCode = 15
-    versionName = "1.0.14"
+    versionCode = 16
+    versionName = "1.0.15"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -77,6 +80,51 @@ android {
   testOptions {
     unitTests.isReturnDefaultValues = true
   }
+}
+
+play {
+  val credsPath = keystoreProps.getProperty("playServiceAccountCredentials")?.trim()
+    ?: System.getenv("PLAY_SERVICE_ACCOUNT_CREDENTIALS")?.trim()
+  if (!credsPath.isNullOrBlank()) {
+    serviceAccountCredentials.set(file(credsPath))
+  }
+  track.set("internal")
+  defaultToAppBundles.set(true)
+  releaseStatus.set(ReleaseStatus.COMPLETED)
+  resolutionStrategy.set(ResolutionStrategy.AUTO)
+}
+
+val playSyncCreds = keystoreProps.getProperty("playServiceAccountCredentials")?.trim()
+  ?: System.getenv("PLAY_SERVICE_ACCOUNT_CREDENTIALS")?.trim()
+val playSyncScript = keystoreProps.getProperty("playUniversalApkSyncScript")?.trim()
+  ?: System.getenv("PLAY_UNIVERSAL_APK_SYNC_SCRIPT")?.trim()
+val playSyncOutput = keystoreProps.getProperty("playUniversalApkOutput")?.trim()
+  ?: System.getenv("PLAY_UNIVERSAL_APK_OUTPUT")?.trim()
+val playSyncConfigured = !playSyncCreds.isNullOrBlank() &&
+  !playSyncScript.isNullOrBlank() &&
+  !playSyncOutput.isNullOrBlank() &&
+  file(playSyncScript).exists()
+
+val syncPlayUniversalApk = tasks.register<Exec>("syncPlayUniversalApk") {
+  group = "publishing"
+  description = "Downloads Google Play's Play-signed universal APK for this versionCode to playUniversalApkOutput (configured in keystore.properties)."
+  val pkgName = android.defaultConfig.applicationId ?: "com.doorking.gate"
+  val verCode = (android.defaultConfig.versionCode ?: 1).toString()
+
+  enabled = playSyncConfigured
+  if (playSyncConfigured) {
+    commandLine(
+      "node", playSyncScript!!,
+      "--credentials", playSyncCreds!!,
+      "--package", pkgName,
+      "--version-code", verCode,
+      "--output", playSyncOutput!!,
+    )
+  }
+}
+
+tasks.matching { it.name == "publishReleaseBundle" }.configureEach {
+  finalizedBy(syncPlayUniversalApk)
 }
 
 kotlin {
