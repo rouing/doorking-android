@@ -61,8 +61,11 @@ import com.doorking.gate.core.network.PasskeyAssertionRequest
 import com.doorking.gate.core.network.PasswordResetRequest
 import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.network.SsoStartRequest
+import com.doorking.gate.core.network.StepUpPasswordRequest
+import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
+import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.feature.auth.ForcedPasswordChangeScreen
 import com.doorking.gate.feature.auth.SignInScreen
 import com.doorking.gate.feature.gates.GatePickerScreen
@@ -104,6 +107,7 @@ class SessionBootstrapViewModel(
     private val passkeyAuthenticator: PasskeyAuthenticator,
     private val ssoCallbacks: SharedFlow<Uri>? = null,
     private val onWidgetSync: () -> Unit = {},
+    private val onBeforeSignOut: suspend () -> Unit = {},
 ) : ViewModel() {
 
     private val _bootstrap = MutableStateFlow<BootstrapState>(BootstrapState.Loading)
@@ -287,6 +291,12 @@ class SessionBootstrapViewModel(
         }
     }
 
+    suspend fun completePasswordStepUp(password: String): Result<Boolean> = runCatching {
+        val confirmRes = api.confirmStepUpWithPassword(StepUpPasswordRequest(password = password))
+        if (!confirmRes.isSuccessful) error(parseErrorBody(confirmRes.errorBody()?.string(), confirmRes.code(), "Password confirmation refused"))
+        true
+    }
+
     fun onGateSelected(gate: GateInfoDto) {
         val current = (_bootstrap.value as? BootstrapState.Ready)?.session
         val updatedSession = current?.copy(gate = gate)
@@ -348,6 +358,7 @@ class SessionBootstrapViewModel(
 
     fun signOut() {
         viewModelScope.launch {
+            runCatching { onBeforeSignOut() }
             runCatching { api.signOut() }
             sessionStorage.clearSessionToken()
             val info = runCatching { api.getSession() }.getOrNull()
@@ -388,6 +399,9 @@ class SessionBootstrapViewModel(
                     passkeyAuthenticator = container.passkeyAuthenticator,
                     ssoCallbacks = container.ssoCallbacks,
                     onWidgetSync = { GateWidgetUpdater.enqueueSync(container.appContext) },
+                    onBeforeSignOut = {
+                        FirebaseHelper.unregisterCurrentDevice(container.appContext, container.api)
+                    },
                 ) as T
         }
     }
@@ -415,6 +429,13 @@ fun DoorkingNavRoot(container: AppContainer) {
                     backStack.clear()
                     backStack.add(state.startRoute)
                 }
+                if (state.session?.loggedIn == true) {
+                    FirebaseHelper.registerCurrentDevice(
+                        context = container.appContext,
+                        api = container.api,
+                        sessionStorage = container.sessionStorage,
+                    )
+                }
             }
             is BootstrapState.OfflineError -> Unit
         }
@@ -423,7 +444,8 @@ fun DoorkingNavRoot(container: AppContainer) {
     if (pendingStepUp != null) {
         StepUpConfirmationDialog(
             pending = pendingStepUp!!,
-            onConfirm = { ctx -> vm.completePasskeyStepUp(ctx) },
+            onConfirmPasskey = { ctx -> vm.completePasskeyStepUp(ctx) },
+            onConfirmPassword = { pw -> vm.completePasswordStepUp(pw) },
             onResolve = container.stepUpCoordinator::resolve,
         )
     }
@@ -540,36 +562,89 @@ fun DoorkingNavRoot(container: AppContainer) {
 @Composable
 private fun StepUpConfirmationDialog(
     pending: PendingStepUp,
-    onConfirm: suspend (Context) -> Result<Boolean>,
+    onConfirmPasskey: suspend (Context) -> Result<Boolean>,
+    onConfirmPassword: suspend (String) -> Result<Boolean>,
     onResolve: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val hasPasskey = pending.error.hasPasskey
+    val canUsePassword = pending.error.canUsePassword
+    var usePasswordMode by remember(pending) { mutableStateOf(!hasPasskey && canUsePassword) }
+    var password by remember(pending) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    fun submitPassword() {
+        if (password.isBlank() || busy) return
+        busy = true
+        error = null
+        scope.launch {
+            onConfirmPassword(password)
+                .onSuccess { ok ->
+                    if (ok) onResolve(true) else busy = false
+                }
+                .onFailure { err ->
+                    error = err.message ?: "Password confirmation failed"
+                    busy = false
+                }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = { if (!busy) onResolve(false) },
         icon = { Icon(Icons.Rounded.Fingerprint, contentDescription = null) },
-        title = { Text("Confirm with passkey") },
+        title = { Text(if (usePasswordMode) "Confirm with password" else "Confirm it's you") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     text = pending.error.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (usePasswordMode && canUsePassword) {
+                    PasswordOutlinedField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = "Current password",
+                        enabled = !busy,
+                        onDone = { submitPassword() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (hasPasskey && canUsePassword) {
+                    TextButton(
+                        enabled = !busy,
+                        onClick = {
+                            error = null
+                            usePasswordMode = !usePasswordMode
+                        },
+                    ) {
+                        Text(if (usePasswordMode) "Use passkey instead" else "Use password instead")
+                    }
+                }
                 if (error != null) ErrorBanner(error!!)
             }
         },
         confirmButton = {
-            if (pending.error.hasPasskey) {
+            if (usePasswordMode && canUsePassword) {
+                Button(
+                    enabled = !busy && password.isNotBlank(),
+                    onClick = { submitPassword() },
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                    } else {
+                        Text("Confirm")
+                    }
+                }
+            } else if (hasPasskey) {
                 Button(
                     enabled = !busy,
                     onClick = {
                         busy = true
                         error = null
                         scope.launch {
-                            onConfirm(context)
+                            onConfirmPasskey(context)
                                 .onSuccess { ok ->
                                     if (ok) onResolve(true) else busy = false
                                 }
@@ -583,14 +658,14 @@ private fun StepUpConfirmationDialog(
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                     } else {
-                        Text("Confirm")
+                        Text("Confirm with passkey")
                     }
                 }
             }
         },
         dismissButton = {
             TextButton(enabled = !busy, onClick = { onResolve(false) }) {
-                Text(if (pending.error.hasPasskey) "Cancel" else "Close")
+                Text(if (hasPasskey || canUsePassword) "Cancel" else "Close")
             }
         },
     )

@@ -9,6 +9,13 @@ plugins {
   alias(libs.plugins.play.publisher)
 }
 
+// Apply Firebase Google Services & Crashlytics plugins only when gitignored google-services.json
+// is present locally so public GitHub builds succeed without Firebase credentials.
+if (file("google-services.json").exists()) {
+  apply(plugin = "com.google.gms.google-services")
+  apply(plugin = "com.google.firebase.crashlytics")
+}
+
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
   if (keystorePropsFile.exists()) {
@@ -28,8 +35,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 20
-    versionName = "1.0.19"
+    versionCode = 21
+    versionName = "1.0.20"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -175,6 +182,11 @@ dependencies {
   // Android Auto (IoT category — resident Buzz Me In on car display)
   implementation(libs.androidx.car.app)
   implementation(libs.androidx.car.app.projected)
+
+  // Firebase Cloud Messaging (Push Notifications) & Crashlytics (no Analytics)
+  implementation(platform(libs.firebase.bom))
+  implementation(libs.firebase.messaging)
+  implementation(libs.firebase.crashlytics)
 
   // Networking, Serialization, Persistence & Media
   implementation(libs.kotlinx.serialization.json)

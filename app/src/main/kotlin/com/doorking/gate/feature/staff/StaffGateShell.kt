@@ -521,6 +521,7 @@ private fun StaffMoreTab(
         item(key = "admin") {
             SectionCard(
                 title = "Management & Monitoring",
+                tonal = true,
                 trailing = {
                     val role = session?.gate?.role.orEmpty().replaceFirstChar(Char::uppercase)
                     if (role.isNotBlank()) StatusPill(text = role, tone = PillTone.Primary)
@@ -528,7 +529,7 @@ private fun StaffMoreTab(
             ) {
                 Surface(
                     shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 ) {
                     Column {
                         MoreListItem("Access Insights", "Dormant credentials, unknown cards & traffic", Icons.Rounded.Analytics) {
@@ -556,10 +557,10 @@ private fun StaffMoreTab(
         }
 
         item(key = "quick") {
-            SectionCard(title = "Gate & Account") {
+            SectionCard(title = "Gate & Account", tonal = true) {
                 Surface(
                     shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 ) {
                     Column {
                         MoreListItem("Live Relays", "Hold open, timed release & status", Icons.Rounded.LockOpen, onOpenLiveRelays)

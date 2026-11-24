@@ -16,6 +16,7 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.DoorkingAuthInterceptor
+import com.doorking.gate.core.push.FirebaseHelper
 import okhttp3.OkHttpClient
 
 /**
@@ -55,9 +56,12 @@ class DoorkingApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         if (getProcessName().endsWith(":crash")) return
         CrashStore.installHandler(this)
+        FirebaseHelper.ensureNotificationChannel(this)
+        FirebaseHelper.configureCrashlytics(this)
         try {
             container = AppContainer(this)
         } catch (t: Throwable) {
+            FirebaseHelper.recordNonFatal(this, t)
             startupCrash = CrashStore.record(this, Thread.currentThread().name, t)
         }
     }

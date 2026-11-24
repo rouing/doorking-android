@@ -218,11 +218,12 @@ fun HistoryScreen(
         ) {
             if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
 
-            // Accessible collapsible Gate users
+            // Accessible collapsible Gate users (borderless tonal)
             item(key = "users") {
                 CollapsibleSectionCard(
                     title = "Gate users (${users.size})",
                     expanded = usersExpanded,
+                    tonal = true,
                     onToggle = { usersExpanded = !usersExpanded },
                 ) {
                     users.forEach { u ->
@@ -232,7 +233,7 @@ fun HistoryScreen(
                             "resident" -> PillTone.Success
                             else -> PillTone.Neutral
                         }
-                        BubbleCard {
+                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -349,10 +350,11 @@ fun HistoryScreen(
                     CollapsibleSectionCard(
                         title = "Past pulls (${pulls.size})",
                         expanded = pullsExpanded,
+                        tonal = true,
                         onToggle = { pullsExpanded = !pullsExpanded },
                     ) {
                         pulls.forEach { pull ->
-                            BubbleCard {
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                                 FlowRow(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp),

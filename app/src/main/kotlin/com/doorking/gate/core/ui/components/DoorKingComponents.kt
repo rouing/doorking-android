@@ -221,13 +221,14 @@ fun CollapsibleSectionCard(
     expanded: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    tonal: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = if (tonal) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLowest,
+        border = if (tonal) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -495,7 +496,28 @@ fun AccessCredentialsSection(
 }
 
 /**
- * Read-only tappable time field backed by Material 3 `TimePicker` (stores 24-hour `"HH:MM"` or `""`).
+ * Converts a 24-hour `"HH:MM"` string into a user-friendly 12-hour display string (e.g. `"07:00"` -> `"7:00 AM"`).
+ * Returns blank or unrecognized input unchanged.
+ */
+fun formatTime12Hour(value24: String): String {
+    val trimmed = value24.trim()
+    if (trimmed.isEmpty()) return ""
+    val parts = trimmed.split(":")
+    val hour = parts.getOrNull(0)?.toIntOrNull() ?: return trimmed
+    val minute = parts.getOrNull(1)?.toIntOrNull() ?: return trimmed
+    if (hour !in 0..23 || minute !in 0..59) return trimmed
+    val suffix = if (hour < 12) "AM" else "PM"
+    val hour12 = when {
+        hour == 0 -> 12
+        hour > 12 -> hour - 12
+        else -> hour
+    }
+    return "$hour12:${minute.toString().padStart(2, '0')} $suffix"
+}
+
+/**
+ * Read-only tappable time field backed by Material 3 `TimePicker`.
+ * Displays 12-hour AM/PM time to the user while storing and emitting 24-hour `"HH:MM"` (or `""`) for the gate.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -516,7 +538,7 @@ fun TimePickerField(
         val pickerState = rememberTimePickerState(
             initialHour = initHour,
             initialMinute = initMin,
-            is24Hour = true,
+            is24Hour = false,
         )
         AlertDialog(
             onDismissRequest = { open = false },
@@ -545,13 +567,13 @@ fun TimePickerField(
 
     Box(modifier = modifier) {
         OutlinedTextField(
-            value = value,
+            value = formatTime12Hour(value),
             onValueChange = {},
             readOnly = true,
             enabled = enabled,
             singleLine = true,
             label = { Text(label) },
-            placeholder = { Text("HH:MM") },
+            placeholder = { Text("—") },
             trailingIcon = {
                 Icon(Icons.Rounded.Schedule, contentDescription = "Pick $label")
             },

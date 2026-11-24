@@ -14,18 +14,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +32,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.AccessAuditReply
 import com.doorking.gate.core.network.ApiClientFactory
@@ -97,17 +98,29 @@ fun InsightsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Borderless tonal lookback selector
             item(key = "period") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     listOf(30, 90, 180, 365).forEach { opt ->
-                        FilterChip(
-                            selected = days == opt,
+                        val selected = days == opt
+                        Surface(
                             onClick = { days = opt },
-                            label = { Text("${opt}d") },
-                        )
+                            shape = CircleShape,
+                            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "${opt}d",
+                                style = MaterialTheme.typography.labelLarge,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                modifier = Modifier.padding(vertical = 8.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -134,7 +147,7 @@ fun InsightsScreen(
                     item(key = "hourly") {
                         val peakCount = data.traffic.byHour.maxOrNull() ?: 0
                         val peakHour = data.traffic.byHour.indexOf(peakCount).coerceAtLeast(0)
-                        SectionCard(title = "Activity by Hour (0–23)") {
+                        SectionCard(title = "Activity by Hour (0–23)", tonal = true) {
                             val peak = peakCount.coerceAtLeast(1)
                             Row(
                                 modifier = Modifier
@@ -174,93 +187,117 @@ fun InsightsScreen(
                     }
                 }
 
+                // Borderless tonal segmented switcher
                 item(key = "seg") {
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        tabs.forEachIndexed { idx, label ->
-                            SegmentedButton(
-                                selected = tabIndex == idx,
-                                onClick = { tabIndex = idx },
-                                shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabs.size),
-                                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            )
-                        }
-                    }
-                }
-
-            when (tabIndex) {
-                0 -> {
-                    if (data.dormant.isEmpty()) {
-                        item(key = "dormant-empty") {
-                            BubbleCard { Text("No dormant credentials in the last $days days.") }
-                        }
-                    } else {
-                        itemsIndexed(data.dormant, key = { idx, it -> "d-$idx-${it.directoryCode}" }) { _, item ->
-                            BubbleCard {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            tabs.forEachIndexed { idx, label ->
+                                val selected = tabIndex == idx
+                                Surface(
+                                    onClick = { tabIndex = idx },
+                                    shape = CircleShape,
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
                                 ) {
-                                    Text(item.name.ifBlank { "Unit ${item.directoryCode}" }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                                    StatusPill("Unit ${item.directoryCode}", tone = PillTone.Primary)
-                                }
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    StatusPill(item.type, tone = PillTone.Neutral)
-                                    if (item.entryCode.isNotBlank()) StatusPill("#${item.entryCode}", tone = PillTone.Success)
-                                    StatusPill(item.lastSeen?.take(10)?.let { "Last seen $it" } ?: "Never seen", tone = PillTone.Warning)
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                                    )
                                 }
                             }
                         }
                     }
                 }
 
-                1 -> {
-                    if (data.unknownCards.isEmpty()) {
-                        item(key = "unk-empty") {
-                            BubbleCard { Text("No unknown card activity in the last $days days.") }
-                        }
-                    } else {
-                        itemsIndexed(data.unknownCards, key = { idx, it -> "u-$idx-${it.cardNumber}" }) { _, item ->
-                            BubbleCard {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text("Card #${item.cardNumber}", style = MaterialTheme.typography.titleSmall)
-                                    StatusPill("${item.uses} uses", tone = PillTone.Warning)
-                                }
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    if (item.admits > 0) StatusPill("${item.admits} admit", tone = PillTone.Success)
-                                    if (item.denies > 0) StatusPill("${item.denies} deny", tone = PillTone.Error)
-                                    if (item.lastSeen.isNotBlank()) StatusPill("Last ${item.lastSeen.take(10)}", tone = PillTone.Neutral)
+                when (tabIndex) {
+                    0 -> {
+                        if (data.dormant.isEmpty()) {
+                            item(key = "dormant-empty") {
+                                BubbleCard { Text("No dormant credentials in the last $days days.") }
+                            }
+                        } else {
+                            itemsIndexed(data.dormant, key = { idx, it -> "d-$idx-${it.directoryCode}" }) { _, item ->
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(item.name.ifBlank { "Unit ${item.directoryCode}" }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                        StatusPill("Unit ${item.directoryCode}", tone = PillTone.Primary)
+                                    }
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        StatusPill(item.type, tone = PillTone.Neutral)
+                                        if (item.entryCode.isNotBlank()) StatusPill("#${item.entryCode}", tone = PillTone.Success)
+                                        StatusPill(item.lastSeen?.take(10)?.let { "Last seen $it" } ?: "Never seen", tone = PillTone.Warning)
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                else -> {
-                    if (data.entryCodes.isEmpty()) {
-                        item(key = "codes-empty") {
-                            BubbleCard { Text("No entry code usage recorded in the last $days days.") }
-                        }
-                    } else {
-                        itemsIndexed(data.entryCodes, key = { idx, it -> "c-$idx-${it.directoryCode}-${it.entryCode}" }) { _, item ->
-                            BubbleCard {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(item.name.ifBlank { "Unit ${item.directoryCode}" }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                                    StatusPill("#${item.entryCode}", tone = if (item.flagged) PillTone.Error else PillTone.Primary)
+                    1 -> {
+                        if (data.unknownCards.isEmpty()) {
+                            item(key = "unk-empty") {
+                                BubbleCard { Text("No unknown card activity in the last $days days.") }
+                            }
+                        } else {
+                            itemsIndexed(data.unknownCards, key = { idx, it -> "u-$idx-${it.cardNumber}" }) { _, item ->
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text("Card #${item.cardNumber}", style = MaterialTheme.typography.titleSmall)
+                                        StatusPill("${item.uses} uses", tone = PillTone.Warning)
+                                    }
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        if (item.admits > 0) StatusPill("${item.admits} admit", tone = PillTone.Success)
+                                        if (item.denies > 0) StatusPill("${item.denies} deny", tone = PillTone.Error)
+                                        if (item.lastSeen.isNotBlank()) StatusPill("Last ${item.lastSeen.take(10)}", tone = PillTone.Neutral)
+                                    }
                                 }
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    StatusPill("${item.uses} uses", tone = PillTone.Neutral)
-                                    StatusPill("${item.distinctDays} days", tone = PillTone.Neutral)
-                                    if (item.offHoursUses > 0) StatusPill("${item.offHoursUses} off-hours", tone = PillTone.Warning)
-                                    if (item.flagged) StatusPill("Flagged", tone = PillTone.Error)
+                            }
+                        }
+                    }
+
+                    else -> {
+                        if (data.entryCodes.isEmpty()) {
+                            item(key = "codes-empty") {
+                                BubbleCard { Text("No entry code usage recorded in the last $days days.") }
+                            }
+                        } else {
+                            itemsIndexed(data.entryCodes, key = { idx, it -> "c-$idx-${it.directoryCode}-${it.entryCode}" }) { _, item ->
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(item.name.ifBlank { "Unit ${item.directoryCode}" }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                        StatusPill("#${item.entryCode}", tone = if (item.flagged) PillTone.Error else PillTone.Primary)
+                                    }
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        StatusPill("${item.uses} uses", tone = PillTone.Neutral)
+                                        StatusPill("${item.distinctDays} days", tone = PillTone.Neutral)
+                                        if (item.offHoursUses > 0) StatusPill("${item.offHoursUses} off-hours", tone = PillTone.Warning)
+                                        if (item.flagged) StatusPill("Flagged", tone = PillTone.Error)
+                                    }
                                 }
                             }
                         }
@@ -268,7 +305,6 @@ fun InsightsScreen(
                 }
             }
         }
-    }
     }
 }
 

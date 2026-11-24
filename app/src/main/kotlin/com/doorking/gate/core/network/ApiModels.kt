@@ -10,6 +10,7 @@ data class ApiErrorResponse(
     val error: String = "Request failed",
     val stepUp: Boolean = false,
     val hasPasskey: Boolean = false,
+    val canUsePassword: Boolean = false,
     val mustChangePassword: Boolean = false,
     val unknownCredential: Boolean = false,
 )
@@ -920,4 +921,43 @@ data class SettingsReply(
 @Serializable
 data class GenericJsonBody(
     @SerialName("data") val raw: JsonElement? = null,
+)
+
+@Serializable
+data class StepUpPasswordRequest(
+    val password: String,
+)
+
+@Serializable
+data class FcmTokenInfoDto(
+    val id: String,
+    val label: String = "Android",
+    val createdAt: String = "",
+    val lastUsedAt: String? = null,
+)
+
+@Serializable
+data class FcmTokensReply(
+    val enabled: Boolean = false,
+    val tokens: List<FcmTokenInfoDto> = emptyList(),
+)
+
+@Serializable
+data class RegisterFcmRequest(
+    val token: String,
+    val label: String? = null,
+)
+
+@Serializable
+data class UnregisterFcmRequest(
+    val token: String? = null,
+    val id: String? = null,
+)
+
+@Serializable
+data class TestFcmReply(
+    val enabled: Boolean = false,
+    val sent: Int = 0,
+    val failed: Int = 0,
+    val removed: Int = 0,
 )

@@ -54,6 +54,23 @@ interface DoorkingApi {
     @DELETE("api/me/passkeys/{id}")
     suspend fun deletePasskey(@Path("id") id: String): Response<OkResponse>
 
+    // --- Android FCM Push Notifications ---
+
+    @GET("api/me/fcm")
+    suspend fun getFcmTokens(): FcmTokensReply
+
+    @POST("api/me/fcm")
+    suspend fun registerFcmToken(@Body body: RegisterFcmRequest): Response<FcmTokensReply>
+
+    @POST("api/me/fcm/unregister")
+    suspend fun unregisterFcmToken(@Body body: UnregisterFcmRequest): Response<FcmTokensReply>
+
+    @DELETE("api/me/fcm/{id}")
+    suspend fun deleteFcmToken(@Path("id") id: String): Response<FcmTokensReply>
+
+    @POST("api/me/fcm/test")
+    suspend fun sendTestFcm(@Body body: JsonObject = JsonObject(emptyMap())): Response<TestFcmReply>
+
     @PUT("api/me/password")
     suspend fun changePassword(@Body body: ChangePasswordRequest): Response<OkResponse>
 
@@ -71,6 +88,9 @@ interface DoorkingApi {
 
     @POST("api/me/step-up")
     suspend fun confirmStepUp(@Body body: PasskeyAssertionRequest): Response<StepUpResponse>
+
+    @POST("api/me/step-up")
+    suspend fun confirmStepUpWithPassword(@Body body: StepUpPasswordRequest): Response<StepUpResponse>
 
     @POST("api/sso/start")
     suspend fun startSso(@Body body: SsoStartRequest): Response<SsoStartResponse>

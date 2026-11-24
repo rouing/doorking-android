@@ -1,6 +1,7 @@
 package com.doorking.gate.feature.admin
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -8,26 +9,34 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SecondaryScrollableTabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -40,7 +49,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
@@ -76,6 +89,25 @@ enum class BoardSection(val title: String, val group: String) {
     System("Board System", "System"),
 }
 
+enum class DisplayLayoutMode(val label: String, val groupName: String) {
+    TwoLine("2-Line", "Display (single line)"),
+    EightLine("8-Line", "Display (8 line)"),
+}
+
+/**
+ * Infers which LCD layout (2-line vs 8-line) the gate currently has populated.
+ */
+fun detectInitialDisplayLayout(fields: List<GateSettingRowDto>): DisplayLayoutMode {
+    val twoLineCount = fields.count { it.group == DisplayLayoutMode.TwoLine.groupName && it.value.isNotBlank() }
+    val eightLineCount = fields.count { it.group == DisplayLayoutMode.EightLine.groupName && it.value.isNotBlank() }
+    return when {
+        twoLineCount > 0 && eightLineCount == 0 -> DisplayLayoutMode.TwoLine
+        eightLineCount > 0 && twoLineCount == 0 -> DisplayLayoutMode.EightLine
+        eightLineCount > twoLineCount -> DisplayLayoutMode.EightLine
+        else -> DisplayLayoutMode.TwoLine
+    }
+}
+
 private val DAY_LETTERS = listOf("S", "M", "T", "W", "T", "F", "S")
 private val DAY_FULL_NAMES = listOf("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 
@@ -108,6 +140,57 @@ fun usHolidaysForYear(year: Int): List<Pair<String, String>> {
     )
 }
 
+/**
+ * Compact 7-day toggle row fitting Sunday–Saturday on a single line without wrapping.
+ */
+@Composable
+private fun WeekdayToggleRow(
+    bits: String,
+    enabled: Boolean,
+    labelPrefix: String,
+    onToggle: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        DAY_LETTERS.forEachIndexed { d, letter ->
+            val selected = bits.getOrNull(d) == '1'
+            Surface(
+                onClick = { if (enabled) onToggle(d) },
+                enabled = enabled,
+                shape = RoundedCornerShape(10.dp),
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                },
+                contentColor = if (selected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(36.dp)
+                    .semantics { contentDescription = "$labelPrefix ${DAY_FULL_NAMES[d]}" },
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = letter,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun BoardSettingsScreen(
@@ -125,6 +208,9 @@ fun BoardSettingsScreen(
     var fields by remember { mutableStateOf<List<GateSettingRowDto>>(emptyList()) }
     val edits = remember { mutableStateMapOf<String, String>() }
     var securityLevel by remember { mutableIntStateOf(2) }
+    var securityMenuOpen by remember { mutableStateOf(false) }
+    var displayMode by remember { mutableStateOf(DisplayLayoutMode.TwoLine) }
+    var displayModeInitialized by remember(gatePhone) { mutableStateOf(false) }
     var holidayYear by remember { mutableIntStateOf(LocalDate.now().year) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -134,7 +220,16 @@ fun BoardSettingsScreen(
         error = null
         scope.launch {
             runCatching { api.getSettings(gatePhone).fields }
-                .onSuccess { fields = it; edits.clear(); loading = false; refreshing = false }
+                .onSuccess { loaded ->
+                    fields = loaded
+                    if (!displayModeInitialized) {
+                        displayMode = detectInitialDisplayLayout(loaded)
+                        displayModeInitialized = true
+                    }
+                    edits.clear()
+                    loading = false
+                    refreshing = false
+                }
                 .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
         }
     }
@@ -189,12 +284,15 @@ fun BoardSettingsScreen(
         onDispose { onDraftChange(null) }
     }
 
-    val sectionFields = remember(fields, section) {
+    val sectionFields = remember(fields, section, displayMode) {
         when (section) {
-            BoardSection.Display -> fields.filter { it.group.startsWith("Display") }
+            BoardSection.Display -> fields.filter { it.group == displayMode.groupName }
             else -> fields.filter { it.group == section.group }
         }
     }
+
+    val facilityToggleField = remember(fields) { fields.firstOrNull { it.key == "facilityEnabled" } }
+    val facilityEnabled = facilityToggleField?.let { current(it) == "Yes" } ?: false
 
     fun clearTarget(f: GateSettingRowDto): String? = when (section) {
         BoardSection.Facility -> if (f.key == "facilityEnabled") "No" else ""
@@ -242,11 +340,11 @@ fun BoardSettingsScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                // Title row with right-aligned Red Clear button (disabled/grayed when nothing to clear)
+                // Header row: title + optional inline Facility Codes toggle + right-aligned Red Clear button
                 item(key = "header") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
@@ -260,6 +358,14 @@ fun BoardSettingsScreen(
                                     color = MaterialTheme.colorScheme.primary,
                                 )
                             }
+                        }
+                        if (section == BoardSection.Facility && facilityToggleField != null) {
+                            Switch(
+                                checked = facilityEnabled,
+                                enabled = !readOnly,
+                                onCheckedChange = { edit(facilityToggleField, if (it) "Yes" else "No") },
+                                modifier = Modifier.semantics { contentDescription = "Enable Facility Codes" },
+                            )
                         }
                         if (supportsClear) {
                             Button(
@@ -280,463 +386,517 @@ fun BoardSettingsScreen(
 
                 if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
 
-        when (section) {
-            BoardSection.Facility -> {
-                items(sectionFields, key = { it.key }) { setting ->
-                    val cur = current(setting)
-                    val dirty = setting.key in edits
-                    val pending = setting.value != setting.gate
-                    val isToggle = setting.key == "facilityEnabled"
-                    val (pillText, pillTone) = when {
-                        dirty -> "Unsaved" to PillTone.Primary
-                        pending -> "Not sent" to PillTone.Success
-                        isToggle -> (if (cur == "Yes") "Enabled" else "Disabled") to (if (cur == "Yes") PillTone.Success else PillTone.Neutral)
-                        cur.isNotBlank() -> "Active" to PillTone.Success
-                        else -> "Unused" to PillTone.Neutral
-                    }
-                    BubbleCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                            if (isToggle) {
-                                Switch(
-                                    checked = cur == "Yes",
-                                    enabled = !readOnly,
-                                    onCheckedChange = { edit(setting, if (it) "Yes" else "No") },
-                                )
-                            } else {
-                                OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, it.filter(Char::isDigit).take(3)) },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    placeholder = { Text("—") },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.width(84.dp),
-                                )
-                            }
-                            StatusPill(pillText, tone = pillTone)
-                        }
-                    }
-                }
-            }
-
-            BoardSection.Holidays -> {
-                val holFields = sectionFields.filter { it.key != "holidaysForSecurity" }
-                val holSwitch = sectionFields.firstOrNull { it.key == "holidaysForSecurity" }
-                item(key = "hol-tools") {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        OutlinedButton(
-                            enabled = !readOnly && holFields.isNotEmpty(),
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                val list = usHolidaysForYear(holidayYear)
-                                holFields.forEachIndexed { idx, setting ->
-                                    edit(setting, list.getOrNull(idx)?.second ?: "")
+                when (section) {
+                    BoardSection.Facility -> {
+                        if (facilityEnabled) {
+                            val codeFields = sectionFields.filter { it.key != "facilityEnabled" }
+                            items(codeFields, key = { it.key }) { setting ->
+                                val cur = current(setting)
+                                val dirty = setting.key in edits
+                                val pending = setting.value != setting.gate
+                                val (pillText, pillTone) = when {
+                                    dirty -> "Unsaved" to PillTone.Primary
+                                    pending -> "Not sent" to PillTone.Success
+                                    cur.isNotBlank() -> "Active" to PillTone.Success
+                                    else -> "Unused" to PillTone.Neutral
                                 }
-                            },
-                        ) { Text("Fill $holidayYear US Holidays") }
-                        OutlinedButton(onClick = { holidayYear = if (holidayYear >= LocalDate.now().year + 2) LocalDate.now().year else holidayYear + 1 }) {
-                            Text("$holidayYear")
-                        }
-                    }
-                }
-                if (holSwitch != null) {
-                    item(key = holSwitch.key) {
-                        val cur = current(holSwitch) == "Yes"
-                        BubbleCard {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("Holidays for Security Levels (TZ4 → HOL)", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                                Switch(checked = cur, enabled = !readOnly, onCheckedChange = { edit(holSwitch, if (it) "Yes" else "No") })
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                        OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, it.filter(Char::isDigit).take(3)) },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            placeholder = { Text("—") },
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            modifier = Modifier.width(84.dp),
+                                        )
+                                        StatusPill(pillText, tone = pillTone)
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                items(holFields.indices.toList(), key = { holFields[it].key }) { idx ->
-                    val setting = holFields[idx]
-                    val cur = current(setting)
-                    val dirty = setting.key in edits
-                    val pending = setting.value != setting.gate
-                    val (pillText, pillTone) = when {
-                        dirty -> "Unsaved" to PillTone.Primary
-                        pending -> "Not sent" to PillTone.Success
-                        cur.isNotBlank() -> "Active" to PillTone.Success
-                        else -> "Unused" to PillTone.Neutral
-                    }
-                    BubbleCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            StatusPill("#${idx + 1}", tone = PillTone.Neutral)
-                            MonthDayPickerField(
-                                label = "Holiday #${idx + 1}",
-                                value = cur,
-                                onValueChange = { edit(setting, it) },
-                                enabled = !readOnly,
-                                modifier = Modifier.weight(1f),
-                            )
-                            StatusPill(pillText, tone = pillTone)
-                        }
-                    }
-                }
-            }
 
-            BoardSection.Security -> {
-                val holOn = fields.firstOrNull { it.key == "holidaysForSecurity" }?.let { current(it) == "Yes" } ?: false
-                item(key = "sec-picker") {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items((2..30).toList()) { lvl ->
-                            FilterChip(
-                                selected = securityLevel == lvl,
-                                onClick = { securityLevel = lvl },
-                                label = { Text("L${lvl.toString().padStart(2, '0')}") },
-                            )
-                        }
-                    }
-                }
-                items(listOf(1, 2, 3, 4), key = { "tz-$securityLevel-$it" }) { tz ->
-                    val byKey = sectionFields.associateBy { it.key }
-                    val begin = byKey["sec${securityLevel}tz${tz}Begin"]
-                    val end = byKey["sec${securityLevel}tz${tz}End"]
-                    val days = byKey["sec${securityLevel}tz${tz}Days"]
-                    val relays = byKey["sec${securityLevel}tz${tz}Relays"]
-                    if (begin != null && end != null && days != null && relays != null) {
-                        val tzLabel = if (tz == 4 && holOn) "HOL" else "TZ$tz"
-                        val tzFields = listOf(begin, end, days, relays)
-                        val dirty = tzFields.any { it.key in edits }
-                        val pending = tzFields.any { it.value != it.gate }
-                        val active = current(begin).isNotBlank() || current(end).isNotBlank()
-                        val (pillText, pillTone) = when {
-                            dirty -> "Unsaved" to PillTone.Primary
-                            pending -> "Not sent" to PillTone.Success
-                            active -> "Active" to PillTone.Success
-                            else -> "Unused" to PillTone.Neutral
-                        }
-                        BubbleCard {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                StatusPill(tzLabel, tone = if (active) PillTone.Primary else PillTone.Neutral)
-                                StatusPill(pillText, tone = pillTone)
-                            }
+                    BoardSection.Holidays -> {
+                        val holFields = sectionFields.filter { it.key != "holidaysForSecurity" }
+                        val holSwitch = sectionFields.firstOrNull { it.key == "holidaysForSecurity" }
+                        item(key = "hol-tools") {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                TimePickerField(
-                                    label = "Start",
-                                    value = current(begin),
-                                    onValueChange = { edit(begin, it) },
-                                    enabled = !readOnly,
+                                OutlinedButton(
+                                    enabled = !readOnly && holFields.isNotEmpty(),
                                     modifier = Modifier.weight(1f),
-                                )
-                                TimePickerField(
-                                    label = "End",
-                                    value = current(end),
-                                    onValueChange = { edit(end, it) },
-                                    enabled = !readOnly,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                DAY_LETTERS.forEachIndexed { d, letter ->
-                                    val on = current(days).getOrNull(d) == '1'
-                                    FilterChip(
-                                        selected = on,
-                                        enabled = !readOnly,
-                                        onClick = { edit(days, toggleBitString(current(days), d, 7)) },
-                                        label = { Text(letter) },
-                                        modifier = Modifier.semantics { contentDescription = "$tzLabel ${DAY_FULL_NAMES[d]}" },
-                                    )
-                                }
-                                listOf(0, 1, 2).forEach { r ->
-                                    val on = current(relays).getOrNull(r) == '1'
-                                    FilterChip(
-                                        selected = on,
-                                        enabled = !readOnly,
-                                        onClick = { edit(relays, toggleBitString(current(relays), r, 19)) },
-                                        label = { Text("R$r") },
-                                        modifier = Modifier.semantics { contentDescription = "$tzLabel Relay $r" },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            BoardSection.HoldOpen -> {
-                val labels = listOf("1", "2", "3", "4", "5", "6", "7", "Hol")
-                val byKey = sectionFields.associateBy { it.key }
-                items(labels.indices.toList(), key = { "ho-${labels[it]}" }) { rowIndex ->
-                    val lbl = labels[rowIndex]
-                    val begin = byKey["holdOpen${lbl}Begin"]
-                    val end = byKey["holdOpen${lbl}End"]
-                    val days = byKey["holdOpen${lbl}Days"]
-                    if (begin != null && end != null && days != null) {
-                        val active = current(begin).isNotBlank() || current(end).isNotBlank()
-                        BubbleCard {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                StatusPill(if (lbl == "Hol") "HOL" else "Row #$lbl", tone = if (active) PillTone.Primary else PillTone.Neutral)
-                                StatusPill(if (active) "Active" else "Unused", tone = if (active) PillTone.Success else PillTone.Neutral)
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                TimePickerField(
-                                    label = "Start",
-                                    value = current(begin),
-                                    onValueChange = { edit(begin, it) },
-                                    enabled = !readOnly,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                TimePickerField(
-                                    label = "End",
-                                    value = current(end),
-                                    onValueChange = { edit(end, it) },
-                                    enabled = !readOnly,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                DAY_LETTERS.forEachIndexed { d, letter ->
-                                    val on = current(days).getOrNull(d) == '1'
-                                    FilterChip(
-                                        selected = on,
-                                        enabled = !readOnly,
-                                        onClick = { edit(days, toggleBitString(current(days), d, 7)) },
-                                        label = { Text(letter) },
-                                        modifier = Modifier.semantics { contentDescription = "Row $lbl ${DAY_FULL_NAMES[d]}" },
-                                    )
-                                }
-                                listOf(0, 1, 2).forEach { r ->
-                                    val rField = byKey["holdOpenRelay$r"]
-                                    if (rField != null) {
-                                        val on = current(rField).getOrNull(rowIndex) == '1'
-                                        FilterChip(
-                                            selected = on,
-                                            enabled = !readOnly,
-                                            onClick = { edit(rField, toggleBitString(current(rField), rowIndex, 8)) },
-                                            label = { Text("R$r") },
-                                            modifier = Modifier.semantics { contentDescription = "Row $lbl Relay $r" },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            BoardSection.Apb -> {
-                items(sectionFields, key = { it.key }) { setting ->
-                    val cur = current(setting)
-                    val dirty = setting.key in edits
-                    val pending = setting.value != setting.gate
-                    BubbleCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                            if (setting.key == "apbResyncAll" || setting.key == "apbScheduleEnabled") {
-                                Switch(
-                                    checked = cur == "Yes",
-                                    enabled = !readOnly,
-                                    onCheckedChange = { edit(setting, if (it) "Yes" else "No") },
-                                )
-                            } else if (dirty || pending) {
-                                StatusPill(if (dirty) "Unsaved" else "Not sent", tone = if (dirty) PillTone.Primary else PillTone.Success)
-                            }
-                        }
-                        if (!setting.note.isNullOrBlank()) {
-                            Text(setting.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        when (setting.key) {
-                            "apbMode" -> {
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf("Off", "Passive", "Active", "Trap").forEach { mode ->
-                                        FilterChip(
-                                            selected = cur == mode,
-                                            enabled = !readOnly,
-                                            onClick = { edit(setting, mode) },
-                                            label = { Text(mode) },
-                                        )
-                                    }
-                                }
-                            }
-                            "apbRelaysIn", "apbRelaysOut" -> {
-                                val selectedRelays = cur.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf(0, 1, 2).forEach { relay ->
-                                        val on = relay in selectedRelays
-                                        FilterChip(
-                                            selected = on,
-                                            enabled = !readOnly && (on || selectedRelays.size < 10),
-                                            onClick = {
-                                                val next = if (on) selectedRelays - relay else selectedRelays + relay
-                                                edit(setting, next.sorted().joinToString(","))
-                                            },
-                                            label = { Text("R$relay") },
-                                            modifier = Modifier.semantics { contentDescription = "${setting.name} Relay $relay" },
-                                        )
-                                    }
-                                }
-                            }
-                            "apbCounterEvery" -> {
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf("Off", "15 Mins", "30 Mins", "Hour").forEach { opt ->
-                                        FilterChip(
-                                            selected = cur == opt,
-                                            enabled = !readOnly,
-                                            onClick = { edit(setting, opt) },
-                                            label = { Text(opt) },
-                                        )
-                                    }
-                                }
-                            }
-                            "apbCounterReset" -> {
-                                OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, it.filter(Char::isDigit).take(5)) },
-                                    placeholder = { Text("0–65535") },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            "apbResyncAll", "apbScheduleEnabled" -> Unit
-                            "apbResyncList" -> {
-                                OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, it.filter { ch -> ch.isDigit() || ch == ',' }) },
-                                    placeholder = { Text("Up to 5 device IDs, comma-separated") },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            "apbScheduleDays" -> {
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    DAY_LETTERS.forEachIndexed { d, letter ->
-                                        val on = cur.getOrNull(d) == '1'
-                                        FilterChip(
-                                            selected = on,
-                                            enabled = !readOnly,
-                                            onClick = { edit(setting, toggleBitString(cur, d, 7)) },
-                                            label = { Text(letter) },
-                                            modifier = Modifier.semantics { contentDescription = "Re-Sync ${DAY_FULL_NAMES[d]}" },
-                                        )
-                                    }
-                                }
-                            }
-                            "apbScheduleTime" -> {
-                                TimePickerField(
-                                    label = "Re-Sync time",
-                                    value = cur,
-                                    onValueChange = { edit(setting, it) },
-                                    enabled = !readOnly,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            else -> if (setting.editable) {
-                                OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, if (setting.maxLength != null) it.take(setting.maxLength) else it) },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            BoardSection.Display, BoardSection.System -> {
-                items(sectionFields, key = { it.key }) { setting ->
-                    val cur = current(setting)
-                    val dirty = setting.key in edits
-                    val pending = setting.value != setting.gate
-                    BubbleCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                            if (!setting.editable) {
-                                StatusPill(cur.ifBlank { "—" }, tone = PillTone.Neutral)
-                            } else if (dirty || pending) {
-                                StatusPill(if (dirty) "Unsaved" else "Not sent", tone = if (dirty) PillTone.Primary else PillTone.Success)
-                            }
-                        }
-                        if (!setting.note.isNullOrBlank()) {
-                            Text(setting.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (setting.editable) {
-                            when (setting.key) {
-                                "outsideLineDigit" -> OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, it.filter(Char::isDigit).take(1)) },
-                                    placeholder = { Text("0–9 (or blank)") },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                "talkTime" -> OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { edit(setting, it.filter { ch -> ch.isDigit() || ch == ':' }.take(5)) },
-                                    placeholder = { Text("m:ss (e.g. 1:30)") },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                else -> OutlinedTextField(
-                                    value = cur,
-                                    onValueChange = { next ->
-                                        val ascii = next.filter { ch -> ch in ' '..'~' }
-                                        edit(setting, if (setting.maxLength != null) ascii.take(setting.maxLength) else ascii)
+                                    onClick = {
+                                        val list = usHolidaysForYear(holidayYear)
+                                        holFields.forEachIndexed { idx, setting ->
+                                            edit(setting, list.getOrNull(idx)?.second ?: "")
+                                        }
                                     },
-                                    singleLine = true,
-                                    enabled = !readOnly,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                                ) { Text("Fill $holidayYear US Holidays") }
+                                OutlinedButton(onClick = { holidayYear = if (holidayYear >= LocalDate.now().year + 2) LocalDate.now().year else holidayYear + 1 }) {
+                                    Text("$holidayYear")
+                                }
+                            }
+                        }
+                        if (holSwitch != null) {
+                            item(key = holSwitch.key) {
+                                val cur = current(holSwitch) == "Yes"
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text("Holidays for Security Levels (TZ4 → HOL)", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                        Switch(checked = cur, enabled = !readOnly, onCheckedChange = { edit(holSwitch, if (it) "Yes" else "No") })
+                                    }
+                                }
+                            }
+                        }
+                        items(holFields.indices.toList(), key = { holFields[it].key }) { idx ->
+                            val setting = holFields[idx]
+                            val cur = current(setting)
+                            val dirty = setting.key in edits
+                            val pending = setting.value != setting.gate
+                            val (pillText, pillTone) = when {
+                                dirty -> "Unsaved" to PillTone.Primary
+                                pending -> "Not sent" to PillTone.Success
+                                cur.isNotBlank() -> "Active" to PillTone.Success
+                                else -> "Unused" to PillTone.Neutral
+                            }
+                            BubbleCard {
+                                Row(
                                     modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    StatusPill("#${idx + 1}", tone = PillTone.Neutral)
+                                    MonthDayPickerField(
+                                        label = "Holiday #${idx + 1}",
+                                        value = cur,
+                                        onValueChange = { edit(setting, it) },
+                                        enabled = !readOnly,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    StatusPill(pillText, tone = pillTone)
+                                }
+                            }
+                        }
+                    }
+
+                    BoardSection.Security -> {
+                        val holOn = fields.firstOrNull { it.key == "holidaysForSecurity" }?.let { current(it) == "Yes" } ?: false
+                        val byKey = sectionFields.associateBy { it.key }
+                        fun activeCountForLevel(lvl: Int): Int = (1..4).count { tz ->
+                            val b = byKey["sec${lvl}tz${tz}Begin"]?.let { current(it) }.orEmpty()
+                            val e = byKey["sec${lvl}tz${tz}End"]?.let { current(it) }.orEmpty()
+                            b.isNotBlank() || e.isNotBlank()
+                        }
+                        fun levelDisplay(lvl: Int): String {
+                            val active = activeCountForLevel(lvl)
+                            val num = lvl.toString().padStart(2, '0')
+                            return if (active > 0) "Level $num · $active active" else "Level $num"
+                        }
+
+                        item(key = "sec-picker") {
+                            ExposedDropdownMenuBox(
+                                expanded = securityMenuOpen,
+                                onExpandedChange = { securityMenuOpen = it },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                OutlinedTextField(
+                                    value = levelDisplay(securityLevel),
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    label = { Text("Security level") },
+                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = securityMenuOpen) },
+                                    modifier = Modifier
+                                        .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                                        .fillMaxWidth(),
                                 )
+                                ExposedDropdownMenu(
+                                    expanded = securityMenuOpen,
+                                    onDismissRequest = { securityMenuOpen = false },
+                                ) {
+                                    (2..30).forEach { lvl ->
+                                        DropdownMenuItem(
+                                            text = { Text(levelDisplay(lvl)) },
+                                            onClick = {
+                                                securityLevel = lvl
+                                                securityMenuOpen = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        items(listOf(1, 2, 3, 4), key = { "tz-$securityLevel-$it" }) { tz ->
+                            val begin = byKey["sec${securityLevel}tz${tz}Begin"]
+                            val end = byKey["sec${securityLevel}tz${tz}End"]
+                            val days = byKey["sec${securityLevel}tz${tz}Days"]
+                            val relays = byKey["sec${securityLevel}tz${tz}Relays"]
+                            if (begin != null && end != null && days != null && relays != null) {
+                                val tzLabel = if (tz == 4 && holOn) "HOL" else "TZ$tz"
+                                val tzFields = listOf(begin, end, days, relays)
+                                val dirty = tzFields.any { it.key in edits }
+                                val pending = tzFields.any { it.value != it.gate }
+                                val active = current(begin).isNotBlank() || current(end).isNotBlank()
+                                val (pillText, pillTone) = when {
+                                    dirty -> "Unsaved" to PillTone.Primary
+                                    pending -> "Not sent" to PillTone.Success
+                                    active -> "Active" to PillTone.Success
+                                    else -> "Unused" to PillTone.Neutral
+                                }
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        StatusPill(tzLabel, tone = if (active) PillTone.Primary else PillTone.Neutral)
+                                        StatusPill(pillText, tone = pillTone)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        TimePickerField(
+                                            label = "Start",
+                                            value = current(begin),
+                                            onValueChange = { edit(begin, it) },
+                                            enabled = !readOnly,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        TimePickerField(
+                                            label = "End",
+                                            value = current(end),
+                                            onValueChange = { edit(end, it) },
+                                            enabled = !readOnly,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                    WeekdayToggleRow(
+                                        bits = current(days),
+                                        enabled = !readOnly,
+                                        labelPrefix = tzLabel,
+                                        onToggle = { d -> edit(days, toggleBitString(current(days), d, 7)) },
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = "Relays",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        listOf(0, 1, 2).forEach { r ->
+                                            val on = current(relays).getOrNull(r) == '1'
+                                            FilterChip(
+                                                selected = on,
+                                                enabled = !readOnly,
+                                                onClick = { edit(relays, toggleBitString(current(relays), r, 19)) },
+                                                label = { Text("R$r") },
+                                                modifier = Modifier.semantics { contentDescription = "$tzLabel Relay $r" },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BoardSection.HoldOpen -> {
+                        val labels = listOf("1", "2", "3", "4", "5", "6", "7", "Hol")
+                        val byKey = sectionFields.associateBy { it.key }
+                        items(labels.indices.toList(), key = { "ho-${labels[it]}" }) { rowIndex ->
+                            val lbl = labels[rowIndex]
+                            val begin = byKey["holdOpen${lbl}Begin"]
+                            val end = byKey["holdOpen${lbl}End"]
+                            val days = byKey["holdOpen${lbl}Days"]
+                            if (begin != null && end != null && days != null) {
+                                val active = current(begin).isNotBlank() || current(end).isNotBlank()
+                                BubbleCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        StatusPill(if (lbl == "Hol") "HOL" else "Row #$lbl", tone = if (active) PillTone.Primary else PillTone.Neutral)
+                                        StatusPill(if (active) "Active" else "Unused", tone = if (active) PillTone.Success else PillTone.Neutral)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        TimePickerField(
+                                            label = "Start",
+                                            value = current(begin),
+                                            onValueChange = { edit(begin, it) },
+                                            enabled = !readOnly,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        TimePickerField(
+                                            label = "End",
+                                            value = current(end),
+                                            onValueChange = { edit(end, it) },
+                                            enabled = !readOnly,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                    WeekdayToggleRow(
+                                        bits = current(days),
+                                        enabled = !readOnly,
+                                        labelPrefix = "Row $lbl",
+                                        onToggle = { d -> edit(days, toggleBitString(current(days), d, 7)) },
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = "Relays",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        listOf(0, 1, 2).forEach { r ->
+                                            val rField = byKey["holdOpenRelay$r"]
+                                            if (rField != null) {
+                                                val on = current(rField).getOrNull(rowIndex) == '1'
+                                                FilterChip(
+                                                    selected = on,
+                                                    enabled = !readOnly,
+                                                    onClick = { edit(rField, toggleBitString(current(rField), rowIndex, 8)) },
+                                                    label = { Text("R$r") },
+                                                    modifier = Modifier.semantics { contentDescription = "Row $lbl Relay $r" },
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BoardSection.Apb -> {
+                        items(sectionFields, key = { it.key }) { setting ->
+                            val cur = current(setting)
+                            val dirty = setting.key in edits
+                            val pending = setting.value != setting.gate
+                            BubbleCard {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                    if (setting.key == "apbResyncAll" || setting.key == "apbScheduleEnabled") {
+                                        Switch(
+                                            checked = cur == "Yes",
+                                            enabled = !readOnly,
+                                            onCheckedChange = { edit(setting, if (it) "Yes" else "No") },
+                                        )
+                                    } else if (dirty || pending) {
+                                        StatusPill(if (dirty) "Unsaved" else "Not sent", tone = if (dirty) PillTone.Primary else PillTone.Success)
+                                    }
+                                }
+                                if (!setting.note.isNullOrBlank()) {
+                                    Text(setting.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                when (setting.key) {
+                                    "apbMode" -> {
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            listOf("Off", "Passive", "Active", "Trap").forEach { mode ->
+                                                FilterChip(
+                                                    selected = cur == mode,
+                                                    enabled = !readOnly,
+                                                    onClick = { edit(setting, mode) },
+                                                    label = { Text(mode) },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    "apbRelaysIn", "apbRelaysOut" -> {
+                                        val selectedRelays = cur.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            listOf(0, 1, 2).forEach { relay ->
+                                                val on = relay in selectedRelays
+                                                FilterChip(
+                                                    selected = on,
+                                                    enabled = !readOnly && (on || selectedRelays.size < 10),
+                                                    onClick = {
+                                                        val next = if (on) selectedRelays - relay else selectedRelays + relay
+                                                        edit(setting, next.sorted().joinToString(","))
+                                                    },
+                                                    label = { Text("R$relay") },
+                                                    modifier = Modifier.semantics { contentDescription = "${setting.name} Relay $relay" },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    "apbCounterEvery" -> {
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            listOf("Off", "15 Mins", "30 Mins", "Hour").forEach { opt ->
+                                                FilterChip(
+                                                    selected = cur == opt,
+                                                    enabled = !readOnly,
+                                                    onClick = { edit(setting, opt) },
+                                                    label = { Text(opt) },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    "apbCounterReset" -> {
+                                        OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, it.filter(Char::isDigit).take(5)) },
+                                            placeholder = { Text("0–65535") },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                    "apbResyncAll", "apbScheduleEnabled" -> Unit
+                                    "apbResyncList" -> {
+                                        OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, it.filter { ch -> ch.isDigit() || ch == ',' }) },
+                                            placeholder = { Text("Up to 5 device IDs, comma-separated") },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                    "apbScheduleDays" -> {
+                                        WeekdayToggleRow(
+                                            bits = cur,
+                                            enabled = !readOnly,
+                                            labelPrefix = "Re-Sync",
+                                            onToggle = { d -> edit(setting, toggleBitString(cur, d, 7)) },
+                                        )
+                                    }
+                                    "apbScheduleTime" -> {
+                                        TimePickerField(
+                                            label = "Re-Sync time",
+                                            value = cur,
+                                            onValueChange = { edit(setting, it) },
+                                            enabled = !readOnly,
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                    else -> if (setting.editable) {
+                                        OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, if (setting.maxLength != null) it.take(setting.maxLength) else it) },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    BoardSection.Display, BoardSection.System -> {
+                        if (section == BoardSection.Display) {
+                            item(key = "display-mode") {
+                                BubbleCard {
+                                    Text("LCD Message Layout", style = MaterialTheme.typography.titleSmall)
+                                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                        DisplayLayoutMode.entries.forEachIndexed { idx, mode ->
+                                            SegmentedButton(
+                                                selected = displayMode == mode,
+                                                onClick = { displayMode = mode },
+                                                shape = SegmentedButtonDefaults.itemShape(
+                                                    index = idx,
+                                                    count = DisplayLayoutMode.entries.size,
+                                                ),
+                                                label = { Text(mode.label, maxLines = 1) },
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "Switch between 2-line (Single Line) and 8-line display messages. Defaults to the layout currently populated on the gate.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                        items(sectionFields, key = { it.key }) { setting ->
+                            val cur = current(setting)
+                            val dirty = setting.key in edits
+                            val pending = setting.value != setting.gate
+                            BubbleCard {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                    if (!setting.editable) {
+                                        StatusPill(cur.ifBlank { "—" }, tone = PillTone.Neutral)
+                                    } else if (dirty || pending) {
+                                        StatusPill(if (dirty) "Unsaved" else "Not sent", tone = if (dirty) PillTone.Primary else PillTone.Success)
+                                    }
+                                }
+                                if (!setting.note.isNullOrBlank()) {
+                                    Text(setting.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (setting.editable) {
+                                    when (setting.key) {
+                                        "outsideLineDigit" -> OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, it.filter(Char::isDigit).take(1)) },
+                                            placeholder = { Text("0–9 (or blank)") },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                        "talkTime" -> OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { edit(setting, it.filter { ch -> ch.isDigit() || ch == ':' }.take(5)) },
+                                            placeholder = { Text("m:ss (e.g. 1:30)") },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                        else -> OutlinedTextField(
+                                            value = cur,
+                                            onValueChange = { next ->
+                                                val ascii = next.filter { ch -> ch in ' '..'~' }
+                                                edit(setting, if (setting.maxLength != null) ascii.take(setting.maxLength) else ascii)
+                                            },
+                                            singleLine = true,
+                                            enabled = !readOnly,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
-    }
     }
 }

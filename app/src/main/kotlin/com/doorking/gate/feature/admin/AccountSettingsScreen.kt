@@ -1,6 +1,9 @@
 package com.doorking.gate.feature.admin
 
+import android.Manifest
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,6 +25,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.MarkEmailRead
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -56,9 +60,12 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.ChangePasswordRequest
 import com.doorking.gate.core.network.DoorkingApi
+import com.doorking.gate.core.network.FcmTokenInfoDto
 import com.doorking.gate.core.network.MeProfileDto
 import com.doorking.gate.core.network.PasskeyInfoDto
 import com.doorking.gate.core.network.PasskeyRegistrationRequest
+import com.doorking.gate.core.network.RegisterFcmRequest
+import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
@@ -89,6 +96,10 @@ fun AccountSettingsScreen(
     var refreshing by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf<MeProfileDto?>(null) }
     var passkeys by remember { mutableStateOf<List<PasskeyInfoDto>>(emptyList()) }
+    var fcmServerEnabled by remember { mutableStateOf(false) }
+    var fcmTokens by remember { mutableStateOf<List<FcmTokenInfoDto>>(emptyList()) }
+    var fcmBusy by remember { mutableStateOf(false) }
+    var notificationPermGranted by remember { mutableStateOf(false) }
     var deletePasskeyTarget by remember { mutableStateOf<PasskeyInfoDto?>(null) }
     var showAddPasskeyDialog by remember { mutableStateOf(false) }
     var addPasskeyName by remember { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim().ifBlank { "Android device" }) }
@@ -118,15 +129,21 @@ fun AccountSettingsScreen(
 
     fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
+        notificationPermGranted = FirebaseHelper.hasNotificationPermission(context)
         scope.launch {
             runCatching {
                 val me = api.getMe()
                 val pks = runCatching { api.listPasskeys().passkeys }.getOrDefault(emptyList())
-                me to pks
+                val fcm = runCatching { api.getFcmTokens() }.getOrNull()
+                Triple(me, pks, fcm)
             }
-                .onSuccess { (me, pks) ->
+                .onSuccess { (me, pks, fcm) ->
                     profile = me
                     passkeys = pks
+                    if (fcm != null) {
+                        fcmServerEnabled = fcm.enabled
+                        fcmTokens = fcm.tokens
+                    }
                     email = me.pendingEmail.ifBlank { me.email }
                     phone = me.phone
                     notifyAccess = me.notifyAccess
@@ -139,6 +156,45 @@ fun AccountSettingsScreen(
                     loading = false
                     refreshing = false
                 }
+        }
+    }
+
+    fun registerThisDeviceFcm() {
+        fcmBusy = true
+        error = null
+        scope.launch {
+            runCatching {
+                val token = FirebaseHelper.fetchFcmToken(context)
+                    ?: error("Firebase push token is unavailable on this build/device.")
+                val res = api.registerFcmToken(
+                    RegisterFcmRequest(token = token, label = FirebaseHelper.defaultDeviceLabel()),
+                )
+                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not enable push"))
+                res.body()
+            }
+                .onSuccess { reply ->
+                    fcmBusy = false
+                    if (reply != null) {
+                        fcmServerEnabled = reply.enabled
+                        fcmTokens = reply.tokens
+                    }
+                    onMessage("Push notifications enabled on this device.")
+                }
+                .onFailure { err ->
+                    fcmBusy = false
+                    error = err.message ?: "Could not enable push"
+                }
+        }
+    }
+
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        notificationPermGranted = granted || FirebaseHelper.hasNotificationPermission(context)
+        if (notificationPermGranted) {
+            registerThisDeviceFcm()
+        } else {
+            onMessage("Notification permission denied. Enable it in Android App Settings.")
         }
     }
 
@@ -506,6 +562,132 @@ fun AccountSettingsScreen(
                                 modifier = Modifier.weight(1f),
                             )
                             Switch(checked = notifyAlerts, onCheckedChange = null)
+                        }
+                    }
+                }
+            }
+
+            item(key = "push_fcm") {
+                val firebaseReady = FirebaseHelper.isAvailable(context)
+                SectionCard(
+                    title = "Push notifications",
+                    tonal = true,
+                    trailing = {
+                        when {
+                            !firebaseReady -> StatusPill("Unavailable", tone = PillTone.Neutral)
+                            !fcmServerEnabled -> StatusPill("Server off", tone = PillTone.Warning)
+                            notificationPermGranted && fcmTokens.isNotEmpty() ->
+                                StatusPill("${fcmTokens.size} device${if (fcmTokens.size == 1) "" else "s"}", tone = PillTone.Success)
+                            else -> StatusPill("Off", tone = PillTone.Neutral)
+                        }
+                    },
+                ) {
+                    Text(
+                        text = when {
+                            !firebaseReady -> "This build does not include Firebase Messaging configuration."
+                            !fcmServerEnabled -> "Your server does not have Firebase push configured yet."
+                            else -> "Receive instant Android alerts for gate events, code changes, and account notices."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (firebaseReady && fcmServerEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilledTonalButton(
+                                enabled = !fcmBusy,
+                                onClick = {
+                                    if (FirebaseHelper.hasNotificationPermission(context)) {
+                                        registerThisDeviceFcm()
+                                    } else {
+                                        notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.NotificationsActive, null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(if (notificationPermGranted && fcmTokens.isNotEmpty()) "Re-sync device" else "Enable on device")
+                            }
+                            if (fcmTokens.isNotEmpty()) {
+                                Button(
+                                    enabled = !fcmBusy,
+                                    onClick = {
+                                        fcmBusy = true
+                                        error = null
+                                        scope.launch {
+                                            runCatching {
+                                                val res = api.sendTestFcm()
+                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Test push failed"))
+                                                res.body()
+                                            }
+                                                .onSuccess { reply ->
+                                                    fcmBusy = false
+                                                    val sent = reply?.sent ?: 0
+                                                    val failed = reply?.failed ?: 0
+                                                    onMessage(
+                                                        if (sent > 0) "Test notification sent to $sent device${if (sent == 1) "" else "s"}."
+                                                        else "Test push did not deliver ($failed failed).",
+                                                    )
+                                                }
+                                                .onFailure { err ->
+                                                    fcmBusy = false
+                                                    error = err.message ?: "Test push failed"
+                                                }
+                                        }
+                                    },
+                                ) { Text("Test") }
+                            }
+                        }
+                        if (fcmTokens.isNotEmpty()) {
+                            fcmTokens.forEach { dev ->
+                                BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(dev.label, style = MaterialTheme.typography.titleSmall)
+                                            Text(
+                                                dev.lastUsedAt?.let { "Last delivered $it" } ?: "Registered",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        IconButton(
+                                            enabled = !fcmBusy,
+                                            onClick = {
+                                                fcmBusy = true
+                                                scope.launch {
+                                                    runCatching {
+                                                        val res = api.deleteFcmToken(dev.id)
+                                                        if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove device"))
+                                                        res.body()
+                                                    }
+                                                        .onSuccess { reply ->
+                                                            fcmBusy = false
+                                                            if (reply != null) fcmTokens = reply.tokens
+                                                            onMessage("Removed ${dev.label} from push notifications.")
+                                                        }
+                                                        .onFailure { err ->
+                                                            fcmBusy = false
+                                                            error = err.message ?: "Could not remove device"
+                                                        }
+                                                }
+                                            },
+                                        ) {
+                                            Icon(
+                                                Icons.Rounded.Delete,
+                                                contentDescription = "Remove ${dev.label}",
+                                                tint = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
