@@ -294,7 +294,12 @@ fun SystemSettingsScreen(
         if (isAdmin) {
             // 1. Gate Login
             item(key = "login") {
-                CollapsibleSection("Gate Login (DKS Cloud)", openLogin, { openLogin = !openLogin }) {
+                CollapsibleSection(
+                    title = "Gate Login (DKS Cloud)",
+                    expanded = openLogin,
+                    onToggle = { openLogin = !openLogin },
+                    helpText = "The DKS Cloud username, password, and 4-digit gate master code used for every pull, send, live relay action, and scheduled transfer. Stored encrypted on your server.",
+                ) {
                     OutlinedTextField(
                         value = dksUser,
                         onValueChange = { dksUser = it },
@@ -498,7 +503,12 @@ fun SystemSettingsScreen(
 
             // 5. API Keys (compact bubble cards + full-width Name input row)
             item(key = "keys") {
-                CollapsibleSection("API Keys (${apiKeys.size})", openKeys, { openKeys = !openKeys }) {
+                CollapsibleSection(
+                    title = "API Keys (${apiKeys.size})",
+                    expanded = openKeys,
+                    onToggle = { openKeys = !openKeys },
+                    helpText = "Scoped tokens for scripts, home automation, or MCP clients to access this gate without signing in. Each key is restricted to this gate and its assigned role/scopes.",
+                ) {
                     if (createdKey != null) {
                         BubbleCard(containerColor = MaterialTheme.colorScheme.primaryContainer) {
                             Text("Key \"${createdKey!!.first}\" created — copy now:", style = MaterialTheme.typography.titleSmall)
@@ -662,7 +672,12 @@ fun SystemSettingsScreen(
 
         // 7. Device Association (responsive 2-line rows so 5-digit codes & names never clip at large font scales)
         item(key = "devices") {
-            CollapsibleSection("Device Association", openDevices, { openDevices = !openDevices }) {
+            CollapsibleSection(
+                title = "Device Association",
+                expanded = openDevices,
+                onToggle = { openDevices = !openDevices },
+                helpText = "Friendly names for ranges of card or clicker numbers (for example 00001–00500 = Residents). Shown as the Event Type on the Activity feed.",
+            ) {
                 devices.forEachIndexed { i, row ->
                     BubbleCard {
                         Row(
@@ -731,7 +746,12 @@ fun SystemSettingsScreen(
         // 8. Danger Zone
         if (isAdmin) {
             item(key = "danger") {
-                CollapsibleSection("Danger Zone", openDanger, { openDanger = !openDanger }) {
+                CollapsibleSection(
+                    title = "Danger Zone",
+                    expanded = openDanger,
+                    onToggle = { openDanger = !openDanger },
+                    helpText = "Removes everything your DoorKing server has stored for this gate (working copy, history, users, API keys). The physical gate hardware itself is untouched.",
+                ) {
                     Text(
                         "Removes all locally stored data, history, snapshots, and user access for this gate. Nothing on the physical gate changes.",
                         style = MaterialTheme.typography.bodySmall,
@@ -757,9 +777,15 @@ private fun CollapsibleSection(
     title: String,
     expanded: Boolean,
     onToggle: () -> Unit,
+    helpText: String? = null,
     content: @Composable () -> Unit,
 ) {
-    CollapsibleSectionCard(title = title, expanded = expanded, onToggle = onToggle) {
+    CollapsibleSectionCard(
+        title = title,
+        expanded = expanded,
+        onToggle = onToggle,
+        helpText = helpText,
+    ) {
         content()
     }
 }

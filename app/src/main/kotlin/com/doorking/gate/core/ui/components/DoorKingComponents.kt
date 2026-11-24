@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -213,6 +214,40 @@ fun SectionCard(
 }
 
 /**
+ * Compact "?" icon button that opens a Material 3 help popup dialog explaining a setting in plain English.
+ */
+@Composable
+fun HelpIconButton(
+    title: String,
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    var open by remember { mutableStateOf(false) }
+    if (open) {
+        AlertDialog(
+            onDismissRequest = { open = false },
+            icon = { Icon(Icons.AutoMirrored.Rounded.HelpOutline, contentDescription = null) },
+            title = { Text(title) },
+            text = { Text(text, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                TextButton(onClick = { open = false }) { Text("Got it") }
+            },
+        )
+    }
+    IconButton(
+        onClick = { open = true },
+        modifier = modifier.size(32.dp),
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Rounded.HelpOutline,
+            contentDescription = "Help for $title",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/**
  * Accessible collapsible section card where the entire header row toggles expansion and reports state to TalkBack.
  */
 @Composable
@@ -222,6 +257,7 @@ fun CollapsibleSectionCard(
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
     tonal: Boolean = false,
+    helpText: String? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -246,11 +282,19 @@ fun CollapsibleSectionCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
+                Row(
                     modifier = Modifier.weight(1f),
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    if (!helpText.isNullOrBlank()) {
+                        HelpIconButton(title = title, text = helpText)
+                    }
+                }
                 Icon(
                     imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                     contentDescription = null,

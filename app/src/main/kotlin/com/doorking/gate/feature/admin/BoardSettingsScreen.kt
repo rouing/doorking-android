@@ -62,6 +62,7 @@ import com.doorking.gate.core.network.GateSettingRowDto
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
+import com.doorking.gate.core.ui.components.HelpIconButton
 import com.doorking.gate.core.ui.components.MonthDayPickerField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.StatusPill
@@ -79,15 +80,55 @@ data class SettingsDraftActions(
     val discard: () -> Unit,
 )
 
-enum class BoardSection(val title: String, val group: String) {
-    Facility("Facility Codes", "Facility Codes"),
-    Holidays("Holidays", "Holidays"),
-    Security("Security Levels", "Security"),
-    HoldOpen("Hold Open", "Hold Open"),
-    Display("Display", "Display"),
-    Apb("Anti-Pass Back", "Anti-Pass Back"),
-    System("Board System", "System"),
+enum class BoardSection(val title: String, val group: String, val helpText: String) {
+    Facility(
+        "Facility Codes",
+        "Facility Codes",
+        "A facility code is a number shared by a batch of cards (000–255). When enabled, the gate accepts only cards whose facility code is in this list.",
+    ),
+    Holidays(
+        "Holidays",
+        "Holidays",
+        "Dates the gate treats as holidays (month and day only). On these dates the HOL row of Hold Open applies, and TZ4 of each security level applies when Holidays for Security Levels is enabled.",
+    ),
+    Security(
+        "Security Levels",
+        "Security",
+        "A security level controls when a code or card works. Each of its 4 time zones sets a time window (start, end, days) and which relays it may open.",
+    ),
+    HoldOpen(
+        "Hold Open",
+        "Hold Open",
+        "Times when the gate stays open automatically, such as during business hours. Each row defines a start and end time, weekdays, and the relays held open. The HOL row applies on holidays.",
+    ),
+    Display(
+        "Display",
+        "Display",
+        "LCD greeting and instruction messages shown on the entry panel screen. Choose 2-Line (Single Line) or 8-Line to match your entry panel's display.",
+    ),
+    Apb(
+        "Anti-Pass Back",
+        "Anti-Pass Back",
+        "Anti-pass back prevents one card from letting multiple people in: a card used on an In relay must be used on an Out relay before it works on In again (applies to security levels 2–27).",
+    ),
+    System(
+        "Board System",
+        "System",
+        "Hardware and dialing settings stored on the gate board, including call talk time, outside line digit, and read-only memory/firmware diagnostics.",
+    ),
 }
+
+private val BOARD_FIELD_HELP = mapOf(
+    "holidaysForSecurity" to "Makes Time Zone 4 of every security level act as the holiday schedule: on holiday dates it applies instead of the level's other time zones.",
+    "apbMode" to "Off disables anti-pass back. Passive, Active, and Trap are the gate's three modes for handling cards used out of turn.",
+    "apbRelaysIn" to "Relays that count as entering the property (up to 10).",
+    "apbRelaysOut" to "Relays that count as exiting the property (up to 10).",
+    "apbCounterEvery" to "Records how many cards are currently inside to the transaction log at the chosen interval.",
+    "apbCounterReset" to "Resets the gate's inside-facility card counter to a specific number (0–65535).",
+    "apbResyncAll" to "Clears the in/out state of cards so they can be used on any relay again.",
+    "talkTime" to "Maximum duration of a call from the entry panel to a resident, as minutes:seconds (up to 4:14).",
+    "outsideLineDigit" to "Optional digit dialed before every phone number to reach an outside line (often 9). Leave blank if not needed.",
+)
 
 enum class DisplayLayoutMode(val label: String, val groupName: String) {
     TwoLine("2-Line", "Display (single line)"),
@@ -348,8 +389,12 @@ fun BoardSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            if (section != BoardSection.System) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
                                 Text(section.title, style = MaterialTheme.typography.titleLarge)
+                                HelpIconButton(title = section.title, text = section.helpText)
                             }
                             if (unsavedCount > 0) {
                                 Text(
@@ -456,7 +501,20 @@ fun BoardSettingsScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
-                                        Text("Holidays for Security Levels (TZ4 → HOL)", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                        ) {
+                                            Text(
+                                                "Holidays for Security Levels (TZ4 → HOL)",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                            BOARD_FIELD_HELP["holidaysForSecurity"]?.let { help ->
+                                                HelpIconButton(title = "Holidays for Security Levels", text = help)
+                                            }
+                                        }
                                         Switch(checked = cur, enabled = !readOnly, onCheckedChange = { edit(holSwitch, if (it) "Yes" else "No") })
                                     }
                                 }
@@ -702,7 +760,16 @@ fun BoardSettingsScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    ) {
+                                        Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f, fill = false))
+                                        BOARD_FIELD_HELP[setting.key]?.let { help ->
+                                            HelpIconButton(title = setting.name, text = help)
+                                        }
+                                    }
                                     if (setting.key == "apbResyncAll" || setting.key == "apbScheduleEnabled") {
                                         Switch(
                                             checked = cur == "Yes",
@@ -849,7 +916,16 @@ fun BoardSettingsScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    ) {
+                                        Text(setting.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f, fill = false))
+                                        BOARD_FIELD_HELP[setting.key]?.let { help ->
+                                            HelpIconButton(title = setting.name, text = help)
+                                        }
+                                    }
                                     if (!setting.editable) {
                                         StatusPill(cur.ifBlank { "—" }, tone = PillTone.Neutral)
                                     } else if (dirty || pending) {
