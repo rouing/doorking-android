@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Doorking Gate</string>
+    <string name="widget_gate_label">Doorking Quick Gate</string>
+    <string name="widget_gate_description">1-tap Buzz Me In and live gate status on your home screen.</string>
+</resources>
