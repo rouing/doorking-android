@@ -89,5 +89,20 @@ class AdminFeaturesTest {
             GateSettingRowDto("displayLine1", "Display (8 line)", "Line 1", 0, 20, "OAKRIDGE CONDOS", "OAKRIDGE CONDOS", true),
         )
         assertEquals(DisplayLayoutMode.EightLine, detectInitialDisplayLayout(eightLineOnly))
+
+        // Real-world 2-line gate where DoorKing pre-filled all 8-line slots with factory defaults
+        val twoLineWithFactoryEightLineDefaults = listOf(
+            GateSettingRowDto("systemMessage", "Display (single line)", "System message", 0, 27, "Welcome to Oakridge", "Welcome to Oakridge", true),
+            GateSettingRowDto("systemInstruction", "Display (single line)", "System instruction", 0, 52, "Push A-Z To Find Name Or No. Enter Code Or Push Call", "", true),
+            GateSettingRowDto("displayLine1", "Display (8 line)", "User message line 1", 0, 20, "   This Space is", "", true),
+            GateSettingRowDto("displayLine2", "Display (8 line)", "User message line 2", 0, 20, "   For Your User", "", true),
+            GateSettingRowDto("displayLine3", "Display (8 line)", "User message line 3", 0, 20, "    Programmable", "", true),
+            GateSettingRowDto("displayLine4", "Display (8 line)", "User message line 4", 0, 20, "      Message", "", true),
+            GateSettingRowDto("displayLine5", "Display (8 line)", "Instructions line 1", 0, 20, "Use A-Z to Find Name", "", true),
+            GateSettingRowDto("displayLine6", "Display (8 line)", "Instructions line 2", 0, 20, "Or Number-Enter Code", "", true),
+            GateSettingRowDto("displayLine7", "Display (8 line)", "Instructions line 3", 0, 20, "Or Push Call-If Busy", "", true),
+            GateSettingRowDto("displayLine8", "Display (8 line)", "Instructions line 4", 0, 20, "Press # - Try Again.", "", true),
+        )
+        assertEquals(DisplayLayoutMode.TwoLine, detectInitialDisplayLayout(twoLineWithFactoryEightLineDefaults))
     }
 }

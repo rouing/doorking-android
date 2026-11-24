@@ -137,17 +137,49 @@ enum class DisplayLayoutMode(val label: String, val groupName: String) {
     EightLine("8-Line", "Display (8 line)"),
 }
 
+private val FACTORY_DISPLAY_DEFAULTS = mapOf(
+    "displayLine1" to "this space is",
+    "displayLine2" to "for your user",
+    "displayLine3" to "programmable",
+    "displayLine4" to "message",
+    "displayLine5" to "use a-z to find name",
+    "displayLine6" to "or number-enter code",
+    "displayLine7" to "or push call-if busy",
+    "displayLine8" to "press # - try again.",
+    "systemInstruction" to "push a-z to find name or no. enter code or push call",
+)
+
+private fun isCustomizedDisplayField(field: GateSettingRowDto): Boolean {
+    val norm = field.value.trim().lowercase().replace(Regex("\\s+"), " ")
+    if (norm.isEmpty()) return false
+    val factoryDefault = FACTORY_DISPLAY_DEFAULTS[field.key]
+    return factoryDefault == null || norm != factoryDefault
+}
+
 /**
- * Infers which LCD layout (2-line vs 8-line) the gate currently has populated.
+ * Infers which LCD layout (2-line vs 8-line) the gate actually uses.
+ * DoorKing boards store both blocks in names.bin and pre-fill the 8-line slots with factory
+ * placeholder text ("This Space is / For Your User / Programmable / Message"), so we prioritize
+ * slots that have been customized away from factory defaults before falling back to non-blank counts.
  */
 fun detectInitialDisplayLayout(fields: List<GateSettingRowDto>): DisplayLayoutMode {
-    val twoLineCount = fields.count { it.group == DisplayLayoutMode.TwoLine.groupName && it.value.isNotBlank() }
-    val eightLineCount = fields.count { it.group == DisplayLayoutMode.EightLine.groupName && it.value.isNotBlank() }
+    val twoLineFields = fields.filter { it.group == DisplayLayoutMode.TwoLine.groupName }
+    val eightLineFields = fields.filter { it.group == DisplayLayoutMode.EightLine.groupName }
+
+    val twoLineCustom = twoLineFields.count(::isCustomizedDisplayField)
+    val eightLineCustom = eightLineFields.count(::isCustomizedDisplayField)
+
     return when {
-        twoLineCount > 0 && eightLineCount == 0 -> DisplayLayoutMode.TwoLine
-        eightLineCount > 0 && twoLineCount == 0 -> DisplayLayoutMode.EightLine
-        eightLineCount > twoLineCount -> DisplayLayoutMode.EightLine
-        else -> DisplayLayoutMode.TwoLine
+        twoLineCustom > 0 && eightLineCustom == 0 -> DisplayLayoutMode.TwoLine
+        eightLineCustom > 0 && twoLineCustom == 0 -> DisplayLayoutMode.EightLine
+        eightLineCustom > twoLineCustom -> DisplayLayoutMode.EightLine
+        twoLineCustom > 0 -> DisplayLayoutMode.TwoLine
+        else -> {
+            // Neither block customized yet: default to 2-Line unless 2-Line is completely blank and 8-Line is populated.
+            val twoLineNonBlank = twoLineFields.count { it.value.isNotBlank() }
+            val eightLineNonBlank = eightLineFields.count { it.value.isNotBlank() }
+            if (twoLineNonBlank == 0 && eightLineNonBlank > 0) DisplayLayoutMode.EightLine else DisplayLayoutMode.TwoLine
+        }
     }
 }
 
