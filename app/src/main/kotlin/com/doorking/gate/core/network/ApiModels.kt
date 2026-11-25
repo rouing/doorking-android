@@ -1027,6 +1027,35 @@ data class BiometricKeysReply(
 )
 
 @Serializable
+data class AiClientRelayItemDto(
+    val relay: Int,
+    val name: String = "",
+)
+
+@Serializable
+data class AiClientGateRelaysDto(
+    val phone: String = "",
+    val siteName: String = "",
+    val relays: List<AiClientRelayItemDto> = emptyList(),
+)
+
+@Serializable
+data class AiClientSessionDto(
+    val id: String,
+    val clientName: String = "",
+    val scopes: List<String> = emptyList(),
+    val allowActivity: Boolean = false,
+    val createdAt: String = "",
+    val lastSeen: String = "",
+    val relaySummary: List<AiClientGateRelaysDto> = emptyList(),
+)
+
+@Serializable
+data class AiClientsReply(
+    val clients: List<AiClientSessionDto> = emptyList(),
+)
+
+@Serializable
 data class FcmTokenInfoDto(
     val id: String,
     val label: String = "Android",

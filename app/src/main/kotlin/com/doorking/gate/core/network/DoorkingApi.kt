@@ -129,6 +129,12 @@ interface DoorkingApi {
     @POST("api/me/biometric-keys")
     suspend fun registerBiometricKey(@Body body: RegisterBiometricKeyRequest): Response<BiometricKeysReply>
 
+    @GET("api/me/ai-clients")
+    suspend fun listAiClients(): AiClientsReply
+
+    @DELETE("api/me/ai-clients/{id}")
+    suspend fun revokeAiClient(@Path("id") id: String): Response<AiClientsReply>
+
     @POST("api/sso/start")
     suspend fun startSso(@Body body: SsoStartRequest): Response<SsoStartResponse>
 

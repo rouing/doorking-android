@@ -7,6 +7,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -61,6 +63,7 @@ import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.SessionStorage
 import com.doorking.gate.core.auth.ThemeMode
+import com.doorking.gate.core.network.AiClientSessionDto
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.ChangePasswordRequest
@@ -90,7 +93,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AccountSettingsScreen(
     api: DoorkingApi,
@@ -111,6 +114,8 @@ fun AccountSettingsScreen(
     var fcmServerEnabled by remember { mutableStateOf(false) }
     var fcmTokens by remember { mutableStateOf<List<FcmTokenInfoDto>>(emptyList()) }
     var webPushSubs by remember { mutableStateOf<List<WebPushSubDto>>(emptyList()) }
+    var aiClients by remember { mutableStateOf<List<AiClientSessionDto>>(emptyList()) }
+    var aiBusyId by remember { mutableStateOf<String?>(null) }
     var fcmBusy by remember { mutableStateOf(false) }
     var notificationPermGranted by remember { mutableStateOf(false) }
     var deletePasskeyTarget by remember { mutableStateOf<PasskeyInfoDto?>(null) }
@@ -169,7 +174,8 @@ fun AccountSettingsScreen(
                 val pks = runCatching { api.listPasskeys().passkeys }.getOrDefault(emptyList())
                 val fcm = runCatching { api.getFcmTokens() }.getOrNull()
                 val webPush = runCatching { api.getWebPushSubscriptions().subscriptions }.getOrDefault(emptyList())
-                listOf(me, pks, fcm, webPush)
+                val ai = runCatching { api.listAiClients().clients }.getOrDefault(emptyList())
+                listOf(me, pks, fcm, webPush, ai)
             }
                 .onSuccess { results ->
                     val me = results[0] as MeProfileDto
@@ -178,6 +184,8 @@ fun AccountSettingsScreen(
                     val fcm = results[2] as com.doorking.gate.core.network.FcmTokensReply?
                     @Suppress("UNCHECKED_CAST")
                     val webPush = results[3] as List<WebPushSubDto>
+                    @Suppress("UNCHECKED_CAST")
+                    val ai = results[4] as List<AiClientSessionDto>
                     profile = me
                     syncTilesFromProfile(me)
                     passkeys = pks
@@ -186,6 +194,7 @@ fun AccountSettingsScreen(
                         fcmTokens = fcm.tokens
                     }
                     webPushSubs = webPush
+                    aiClients = ai
                     email = me.pendingEmail.ifBlank { me.email }
                     phone = me.phone
                     notifyAccess = me.notifyAccess
@@ -1005,6 +1014,95 @@ fun AccountSettingsScreen(
                                 enabled = biometricAvailable,
                                 onCheckedChange = null,
                             )
+                        }
+                    }
+                }
+            }
+
+            item(key = "ai_clients") {
+                SectionCard(
+                    title = "Connected AI Clients",
+                    tonal = true,
+                    trailing = if (aiClients.isNotEmpty()) {
+                        { StatusPill("${aiClients.size}", tone = PillTone.Primary) }
+                    } else {
+                        null
+                    },
+                ) {
+                    Text(
+                        text = "AI assistants (such as Gemini or Claude) authorized via MCP OAuth. Revoking immediately ends that client's access.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (aiClients.isEmpty()) {
+                        Text(
+                            text = "No connected AI clients.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        aiClients.forEach { client ->
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(client.clientName.ifBlank { "AI Client" }, style = MaterialTheme.typography.titleSmall)
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            client.relaySummary.forEach { g ->
+                                                g.relays.forEach { r ->
+                                                    val lbl = if (client.relaySummary.size > 1) "${g.siteName}: ${r.name}" else r.name
+                                                    StatusPill(lbl, tone = PillTone.Primary)
+                                                }
+                                            }
+                                            if (client.allowActivity) StatusPill("Recent activity", tone = PillTone.Neutral)
+                                            if ("doorking:stage" in client.scopes) StatusPill("Staging & relays", tone = PillTone.Warning)
+                                            if (client.relaySummary.isEmpty() && "doorking:stage" !in client.scopes) {
+                                                StatusPill("Read-only", tone = PillTone.Neutral)
+                                            }
+                                        }
+                                        Text(
+                                            text = "Connected ${client.createdAt.take(16).replace('T', ' ')}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    IconButton(
+                                        enabled = aiBusyId == null,
+                                        onClick = {
+                                            aiBusyId = client.id
+                                            error = null
+                                            scope.launch {
+                                                runCatching {
+                                                    val res = api.revokeAiClient(client.id)
+                                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not revoke AI client"))
+                                                    res.body()
+                                                }
+                                                    .onSuccess { reply ->
+                                                        aiBusyId = null
+                                                        if (reply != null) aiClients = reply.clients
+                                                        onMessage("Revoked ${client.clientName}.")
+                                                    }
+                                                    .onFailure { err ->
+                                                        aiBusyId = null
+                                                        error = err.message ?: "Could not revoke AI client"
+                                                    }
+                                            }
+                                        },
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.Delete,
+                                            contentDescription = "Revoke ${client.clientName}",
+                                            tint = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
