@@ -1,7 +1,4 @@
-• Connected AI Clients list in User Settings with 1-tap access revocation
-• Android 16+ AppFunctions for Gemini voice gate control
-• Quick Settings pull-down tiles (1 per visible relay) + 1-tap add
-• Freely resizable multi-relay Quick Gate widget + 1×1 per-relay shortcuts
-• Hardware Keystore ECDSA P-256 fingerprint step-up & immediate app lock
-• Push-notification passkey approval with 2-digit number match
-• Live Android Auto tiles with lock icons & camera relay mapping
+• Guided post-invite Passkey & Fingerprint lock setup
+• Faster 1-tap gate widgets with live widget picker previews
+• Opt-in crash diagnostics with user-tapped Send button & in-app Privacy Policy
+• Improved security hardening, battery life, camera streaming & startup speed

@@ -7,6 +7,7 @@ import androidx.car.app.Screen
 import androidx.car.app.Session
 import androidx.car.app.SessionInfo
 import androidx.car.app.validation.HostValidator
+import com.doorking.gate.R
 
 /**
  * Android Auto IoT service (`androidx.car.app.category.IOT`).
@@ -21,7 +22,7 @@ class DoorkingCarAppService : CarAppService() {
             HostValidator.ALLOW_ALL_HOSTS_VALIDATOR
         } else {
             HostValidator.Builder(applicationContext)
-                .addAllowedHosts(androidx.car.app.R.array.hosts_allowlist_sample)
+                .addAllowedHosts(R.array.car_hosts_allowlist)
                 .build()
         }
     }

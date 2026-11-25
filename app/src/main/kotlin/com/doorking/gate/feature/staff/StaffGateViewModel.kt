@@ -24,9 +24,11 @@ import com.doorking.gate.core.network.SnapshotMinuteDto
 import com.doorking.gate.core.network.SnapshotRunDto
 import com.doorking.gate.core.network.SnapshotRunRequest
 import com.doorking.gate.core.network.TransactionRowDto
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,6 +68,7 @@ class StaffGateViewModel(
     private val api: DoorkingApi,
     private val sessionStorage: SessionStorage,
     private val pollIntervalMs: Long = 2_000L,
+    private val snapPollIntervalMs: Long = 2_500L,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(StaffGateUiState())
@@ -73,9 +76,27 @@ class StaffGateViewModel(
 
     private var jobPoll: Job? = null
     private var snapPoll: Job? = null
+    private var active: Boolean = true
 
     init {
         loadAll(initial = true)
+    }
+
+    fun setActive(isActive: Boolean) {
+        val wasActive = active
+        active = isActive
+        if (!isActive) {
+            jobPoll?.cancel()
+            jobPoll = null
+            snapPoll?.cancel()
+            snapPoll = null
+        } else if (!wasActive) {
+            val resumeJob = _uiState.value.job?.state == "running"
+            val resumeSnap = _uiState.value.snapRun?.state == "running"
+            if (resumeJob) startJobPolling()
+            if (resumeSnap) startSnapPolling()
+            if (!resumeJob && !resumeSnap) refreshJob()
+        }
     }
 
     fun serverUrl(): String = sessionStorage.currentServerUrl()
@@ -87,23 +108,27 @@ class StaffGateViewModel(
                 refreshing = !initial,
                 error = null,
             )
-            runCatching {
-                val res = runCatching { api.getResidents(gatePhone) }.getOrNull()
-                val data = runCatching { api.getData(gatePhone) }.getOrNull()
-                val prefs = runCatching { api.getPrefs(gatePhone) }.getOrDefault(GatePrefsDto())
-                val cams = runCatching { api.getCameras(gatePhone).settings }.getOrNull()
-                val snapsReply = runCatching { api.getSnapshots(gatePhone) }.getOrNull()
-                val job = runCatching { api.getJob(gatePhone) }.getOrNull()
-                LoadedGateBundle(
-                    res,
-                    data?.transactions?.rows.orEmpty(),
-                    data?.transactions?.next,
-                    prefs,
-                    cams,
-                    snapsReply?.snapshots.orEmpty(),
-                    snapsReply?.run,
-                    job,
-                )
+            runCatchingNonFatal {
+                coroutineScope {
+                    val resDeferred = async { runCatchingNonFatal { api.getResidents(gatePhone) }.getOrNull() }
+                    val dataDeferred = async { runCatchingNonFatal { api.getData(gatePhone) }.getOrNull() }
+                    val prefsDeferred = async { runCatchingNonFatal { api.getPrefs(gatePhone) }.getOrDefault(GatePrefsDto()) }
+                    val camsDeferred = async { runCatchingNonFatal { api.getCameras(gatePhone).settings }.getOrNull() }
+                    val snapsDeferred = async { runCatchingNonFatal { api.getSnapshots(gatePhone) }.getOrNull() }
+                    val jobDeferred = async { runCatchingNonFatal { api.getJob(gatePhone) }.getOrNull() }
+                    val data = dataDeferred.await()
+                    val snapsReply = snapsDeferred.await()
+                    LoadedGateBundle(
+                        resDeferred.await(),
+                        data?.transactions?.rows.orEmpty(),
+                        data?.transactions?.next,
+                        prefsDeferred.await(),
+                        camsDeferred.await(),
+                        snapsReply?.snapshots.orEmpty(),
+                        snapsReply?.run,
+                        jobDeferred.await(),
+                    )
+                }
             }
                 .onSuccess { b ->
                     _uiState.value = _uiState.value.copy(
@@ -371,9 +396,11 @@ class StaffGateViewModel(
     }
 
     private fun startSnapPolling() {
+        if (!active) return
         snapPoll?.cancel()
         snapPoll = viewModelScope.launch {
-            while (isActive) {
+            var consecutiveErrors = 0
+            while (isActive && active) {
                 val reply = try {
                     api.getSnapshots(gatePhone)
                 } catch (ce: CancellationException) {
@@ -382,13 +409,25 @@ class StaffGateViewModel(
                     null
                 }
                 if (reply != null) {
+                    consecutiveErrors = 0
                     _uiState.value = _uiState.value.copy(
                         snapshots = reply.snapshots,
                         snapRun = reply.run,
                     )
                     if (reply.run?.state != "running") break
+                    delay(snapPollIntervalMs)
+                } else {
+                    consecutiveErrors += 1
+                    if (consecutiveErrors >= MAX_POLL_ERRORS) {
+                        _uiState.value = _uiState.value.copy(
+                            error = "Lost connection while checking camera download. Tap Refresh to retry.",
+                        )
+                        break
+                    }
+                    val backoffMs = (snapPollIntervalMs * (1L shl (consecutiveErrors - 1)))
+                        .coerceAtMost(MAX_POLL_BACKOFF_MS)
+                    delay(backoffMs)
                 }
-                delay(2_500L)
             }
         }
     }
@@ -482,47 +521,43 @@ class StaffGateViewModel(
      */
     fun refreshJob() {
         viewModelScope.launch {
-            val job = try {
-                api.getJob(gatePhone)
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (_: Throwable) {
-                null
+            val fetchSnaps = _uiState.value.cameras != null
+            val (job, snapReply) = coroutineScope {
+                val jobDeferred = async { runCatchingNonFatal { api.getJob(gatePhone) }.getOrNull() }
+                val snapDeferred = if (fetchSnaps) {
+                    async { runCatchingNonFatal { api.getSnapshots(gatePhone) }.getOrNull() }
+                } else {
+                    null
+                }
+                jobDeferred.await() to snapDeferred?.await()
             }
             if (job != null) {
                 val prevState = _uiState.value.job?.state
                 _uiState.value = _uiState.value.copy(job = job)
                 if (job.state == "running") {
-                    if (jobPoll?.isActive != true) startJobPolling()
+                    if (active && jobPoll?.isActive != true) startJobPolling()
                 } else if (prevState == "running" && job.state == "done") {
                     loadAll(initial = false)
                 }
             }
-            if (_uiState.value.cameras != null) {
-                val snapReply = try {
-                    api.getSnapshots(gatePhone)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Throwable) {
-                    null
-                }
-                if (snapReply != null) {
-                    _uiState.value = _uiState.value.copy(
-                        snapshots = snapReply.snapshots,
-                        snapRun = snapReply.run,
-                    )
-                    if (snapReply.run?.state == "running" && snapPoll?.isActive != true) {
-                        startSnapPolling()
-                    }
+            if (snapReply != null) {
+                _uiState.value = _uiState.value.copy(
+                    snapshots = snapReply.snapshots,
+                    snapRun = snapReply.run,
+                )
+                if (snapReply.run?.state == "running" && active && snapPoll?.isActive != true) {
+                    startSnapPolling()
                 }
             }
         }
     }
 
     private fun startJobPolling() {
+        if (!active) return
         jobPoll?.cancel()
         jobPoll = viewModelScope.launch {
-            while (isActive) {
+            var consecutiveErrors = 0
+            while (isActive && active) {
                 val job = try {
                     api.getJob(gatePhone)
                 } catch (ce: CancellationException) {
@@ -531,16 +566,36 @@ class StaffGateViewModel(
                     null
                 }
                 if (job != null) {
+                    consecutiveErrors = 0
                     val prevState = _uiState.value.job?.state
                     _uiState.value = _uiState.value.copy(job = job)
                     if (job.state != "running") {
                         if (job.state == "done" && prevState == "running") loadAll(initial = false)
                         break
                     }
+                    delay(pollIntervalMs)
+                } else {
+                    consecutiveErrors += 1
+                    if (consecutiveErrors >= MAX_POLL_ERRORS) {
+                        _uiState.value = _uiState.value.copy(
+                            error = "Lost connection while checking gate progress. Tap Refresh to retry.",
+                        )
+                        break
+                    }
+                    val backoffMs = (pollIntervalMs * (1L shl (consecutiveErrors - 1)))
+                        .coerceAtMost(MAX_POLL_BACKOFF_MS)
+                    delay(backoffMs)
                 }
-                delay(pollIntervalMs)
             }
         }
+    }
+
+    private inline fun <T> runCatchingNonFatal(block: () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (t: Throwable) {
+        Result.failure(t)
     }
 
     private fun parseError(raw: String?, code: Int, fallback: String): String {
@@ -563,6 +618,8 @@ class StaffGateViewModel(
     )
 
     companion object {
+        private const val MAX_POLL_ERRORS = 5
+        private const val MAX_POLL_BACKOFF_MS = 30_000L
         private val RNG = SecureRandom()
 
         /** Generates a non-weak, non-colliding 4-digit entry code (mirrors `generateSafeEntryCode` in `src/shared.ts`). */

@@ -29,20 +29,21 @@ import kotlinx.coroutines.withContext
 
 /**
  * Primary Android Auto screen showing one-tap gate relay tiles (`GridTemplate`) with lock icons
- * and automatic live status/cooldown polling while visible.
+ * and automatic live status polling (with local cooldown countdown, error backoff, and automatic
+ * pause when signed out or when no buzzable gates exist).
  */
 class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var uiState: CarGateUiState = CarGateUiState.Loading
     private var pollJob: Job? = null
+    private var consecutiveErrors: Int = 0
 
     init {
         lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
                     refresh()
-                    startPolling()
                 }
 
                 override fun onStop(owner: LifecycleOwner) {
@@ -160,32 +161,78 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
         pollJob?.cancel()
         pollJob = scope.launch {
             var idleTicks = 0
+            var localCooldownTicks = 0
             while (isActive) {
-                val cur = uiState
-                val fast = cur is CarGateUiState.Ready && (
-                    cur.buzzingKey != null ||
-                        cur.relays.any { it.isBusy || it.cooldownSeconds > 0 }
-                    )
-                delay(if (fast) FAST_POLL_MS else IDLE_POLL_MS)
-                val latest = uiState
-                // Skip overwriting an in-flight buzz spinner while the HTTP call is active.
-                if (latest is CarGateUiState.Ready && latest.buzzingKey != null) continue
-                if (latest is CarGateUiState.Ready) {
-                    if (fast) {
-                        idleTicks = 0
-                        refreshStatusesAndApply(latest)
-                    } else {
-                        idleTicks++
-                        if (idleTicks >= FULL_REFRESH_EVERY_IDLE_TICKS) {
-                            idleTicks = 0
+                when (val cur = uiState) {
+                    CarGateUiState.SignedOut,
+                    is CarGateUiState.NoBuzzableGates,
+                    -> {
+                        // Stop automatic polling until user explicitly taps Refresh / Check again.
+                        return@launch
+                    }
+
+                    CarGateUiState.Loading -> {
+                        delay(COOLDOWN_TICK_MS)
+                    }
+
+                    is CarGateUiState.Error -> {
+                        val backoffMs = (ERROR_BACKOFF_BASE_MS shl consecutiveErrors.coerceAtMost(3))
+                            .coerceAtMost(ERROR_BACKOFF_MAX_MS)
+                        delay(backoffMs)
+                        if (uiState is CarGateUiState.Error) {
                             fetchAndApply(silent = true)
-                        } else {
-                            refreshStatusesAndApply(latest)
                         }
                     }
-                } else {
-                    idleTicks = 0
-                    fetchAndApply(silent = true)
+
+                    is CarGateUiState.Ready -> {
+                        val hasBusy = cur.buzzingKey != null || cur.relays.any { it.isBusy }
+                        val hasCooldown = !hasBusy && cur.relays.any { it.cooldownSeconds > 0 }
+                        when {
+                            hasBusy -> {
+                                idleTicks = 0
+                                localCooldownTicks = 0
+                                delay(FAST_POLL_MS)
+                                val latest = uiState
+                                if (latest is CarGateUiState.Ready && latest.buzzingKey == null) {
+                                    refreshStatusesAndApply(latest)
+                                }
+                            }
+
+                            hasCooldown -> {
+                                idleTicks = 0
+                                delay(COOLDOWN_TICK_MS)
+                                val latest = uiState
+                                if (latest is CarGateUiState.Ready && latest.buzzingKey == null) {
+                                    val ticked = CarGateRepository.tickLocalCooldown(latest, 1)
+                                    if (ticked != latest) {
+                                        uiState = ticked
+                                        invalidate()
+                                    }
+                                    localCooldownTicks++
+                                    val cooldownFinished = ticked.relays.none { it.cooldownSeconds > 0 }
+                                    if (cooldownFinished || localCooldownTicks >= COOLDOWN_RESYNC_TICKS) {
+                                        localCooldownTicks = 0
+                                        refreshStatusesAndApply(ticked)
+                                    }
+                                }
+                            }
+
+                            else -> {
+                                localCooldownTicks = 0
+                                delay(IDLE_POLL_MS)
+                                val latest = uiState
+                                if (latest is CarGateUiState.Ready && latest.buzzingKey == null) {
+                                    idleTicks++
+                                    if (idleTicks >= FULL_REFRESH_EVERY_IDLE_TICKS) {
+                                        idleTicks = 0
+                                        fetchAndApply(silent = true)
+                                    } else {
+                                        refreshStatusesAndApply(latest)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -215,11 +262,20 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             invalidate()
             return
         }
+        consecutiveErrors = 0
         if (uiState !is CarGateUiState.Ready) {
             uiState = CarGateUiState.Loading
             invalidate()
         }
-        scope.launch { fetchAndApply(silent = false) }
+        scope.launch {
+            fetchAndApply(silent = false)
+            if (uiState is CarGateUiState.Ready || uiState is CarGateUiState.Error) {
+                startPolling()
+            } else {
+                pollJob?.cancel()
+                pollJob = null
+            }
+        }
     }
 
     private suspend fun fetchAndApply(silent: Boolean) {
@@ -230,6 +286,11 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
                 sessionStorage = app.container.sessionStorage,
                 api = app.container.api,
             )
+        }
+        consecutiveErrors = if (next is CarGateUiState.Error) {
+            (consecutiveErrors + 1).coerceAtMost(4)
+        } else {
+            0
         }
         if (!silent || next != uiState) {
             uiState = next
@@ -281,14 +342,17 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             }
             uiState = refreshed
             invalidate()
-            // Restart polling immediately on the 2s cadence so cooldown/busy updates smoothly.
             startPolling()
         }
     }
 
     private companion object {
+        const val COOLDOWN_TICK_MS = 1_000L
+        const val COOLDOWN_RESYNC_TICKS = 10
         const val FAST_POLL_MS = 2_000L
         const val IDLE_POLL_MS = 10_000L
         const val FULL_REFRESH_EVERY_IDLE_TICKS = 6
+        const val ERROR_BACKOFF_BASE_MS = 10_000L
+        const val ERROR_BACKOFF_MAX_MS = 60_000L
     }
 }

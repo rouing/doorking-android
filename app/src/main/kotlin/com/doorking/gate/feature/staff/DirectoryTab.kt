@@ -23,7 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,6 +55,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -169,6 +170,7 @@ fun DirectoryTab(
     }
 
     val allRows = state.residentsReply?.rows.orEmpty()
+    val existingEntryCodes = remember(allRows) { allRows.map { it.entryCode } }
     val kindRows = remember(allRows, isVendor) {
         allRows.filter { isVisibleDirectoryRow(it) && (it.type.equals("Vendor", ignoreCase = true)) == isVendor }
     }
@@ -229,7 +231,7 @@ fun DirectoryTab(
             ResidentEditorSheet(
                 existing = editingTarget,
                 isVendor = isVendor,
-                existingEntryCodes = allRows.map { it.entryCode },
+                existingEntryCodes = existingEntryCodes,
                 busy = state.editBusy,
                 error = state.error,
                 onSave = { code, name, area, phone, entryCode, note ->
@@ -255,11 +257,11 @@ fun DirectoryTab(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (state.error != null) {
-            item(key = "error") { ErrorBanner(state.error) }
+            item(key = "error", contentType = "error") { ErrorBanner(state.error) }
         }
 
         if (conflicts.isNotEmpty() && !isVendor) {
-            item(key = "conflicts") {
+            item(key = "conflicts", contentType = "conflicts") {
                 SectionCard(
                     title = "${conflicts.size} Sync Conflict${if (conflicts.size == 1) "" else "s"}",
                     trailing = { StatusPill("Action needed", tone = PillTone.Error) },
@@ -293,7 +295,7 @@ fun DirectoryTab(
             }
         }
 
-        item(key = "search") {
+        item(key = "search", contentType = "search") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SearchPillBar(
                     query = query,
@@ -320,7 +322,7 @@ fun DirectoryTab(
         }
 
         if (filtered.isEmpty()) {
-            item(key = "empty") {
+            item(key = "empty", contentType = "empty") {
                 BubbleCard {
                     Text(
                         text = if (query.isBlank()) "No ${if (isVendor) "vendors" else "residents"} yet" else "No matching entries",
@@ -338,8 +340,14 @@ fun DirectoryTab(
                 }
             }
         } else {
-            itemsIndexed(items = filtered, key = { index, it -> "$index-${it.directoryCode}" }) { _, row ->
-                val expanded = expandedCode == row.directoryCode
+            items(
+                items = filtered,
+                key = { it.directoryCode },
+                contentType = { "directory_row" },
+            ) { row ->
+                val expanded by remember(row.directoryCode) {
+                    derivedStateOf { expandedCode == row.directoryCode }
+                }
                 BubbleCard(
                     modifier = Modifier.semantics {
                         stateDescription = if (expanded) "Expanded" else "Collapsed"

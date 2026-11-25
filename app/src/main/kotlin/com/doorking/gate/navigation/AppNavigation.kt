@@ -2,6 +2,9 @@ package com.doorking.gate.navigation
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.Trace
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -55,6 +59,7 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.AuthEvent
 import com.doorking.gate.core.network.AuthEventBus
+import com.doorking.gate.core.network.BiometricChallengeRequest
 import com.doorking.gate.core.network.ChangePasswordRequest
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.GateInfoDto
@@ -63,10 +68,10 @@ import com.doorking.gate.core.network.InviteCheckResponse
 import com.doorking.gate.core.network.LoginRequest
 import com.doorking.gate.core.network.NativeSsoExchangeRequest
 import com.doorking.gate.core.network.PasskeyAssertionRequest
+import com.doorking.gate.core.network.PasskeyRegistrationRequest
 import com.doorking.gate.core.network.PasswordResetRequest
-import com.doorking.gate.core.network.SessionResponse
-import com.doorking.gate.core.network.BiometricChallengeRequest
 import com.doorking.gate.core.network.RegisterBiometricKeyRequest
+import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.network.SsoStartRequest
 import com.doorking.gate.core.network.StepUpBiometricSignedRequest
 import com.doorking.gate.core.network.StepUpPasswordRequest
@@ -82,23 +87,25 @@ import com.doorking.gate.feature.gates.GatePickerScreen
 import com.doorking.gate.feature.portal.ResidentPortalScreen
 import com.doorking.gate.feature.staff.StaffGateShell
 import com.doorking.gate.widget.GateWidgetUpdater
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.Serializable
+import kotlinx.coroutines.withContext
 
 /** Type-safe Navigation 3 top-level destinations. */
-@Serializable
 sealed interface AppRoute {
-    @Serializable data object Splash : AppRoute
-    @Serializable data object SignIn : AppRoute
-    @Serializable data class AcceptInvite(val serverUrl: String, val token: String) : AppRoute
-    @Serializable data object ForcedPasswordChange : AppRoute
-    @Serializable data object GatePicker : AppRoute
-    @Serializable data class ResidentPortal(val gatePhone: String) : AppRoute
-    @Serializable data class StaffGate(val gatePhone: String) : AppRoute
+    data object Splash : AppRoute
+    data object SignIn : AppRoute
+    data class AcceptInvite(val serverUrl: String, val token: String) : AppRoute
+    data object ForcedPasswordChange : AppRoute
+    data object GatePicker : AppRoute
+    data class ResidentPortal(val gatePhone: String) : AppRoute
+    data class StaffGate(val gatePhone: String) : AppRoute
 }
 
 sealed interface BootstrapState {
@@ -111,6 +118,7 @@ sealed interface BootstrapState {
  * Coordinates app startup session bootstrap, password / passkey / SSO sign-in, forced password changes,
  * passkey step-up verification, and global `401` / `403` auth events.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class SessionBootstrapViewModel(
     private val sessionStorage: SessionStorage,
     private val api: DoorkingApi,
@@ -120,6 +128,7 @@ class SessionBootstrapViewModel(
     private val inviteLinks: SharedFlow<Uri>? = null,
     private val onWidgetSync: () -> Unit = {},
     private val onBeforeSignOut: suspend () -> Unit = {},
+    private val stepUpApi: DoorkingApi = api,
 ) : ViewModel() {
 
     private val _bootstrap = MutableStateFlow<BootstrapState>(BootstrapState.Loading)
@@ -138,6 +147,7 @@ class SessionBootstrapViewModel(
                 when (event) {
                     AuthEvent.SessionExpired -> {
                         _bootstrap.value = BootstrapState.Ready(AppRoute.SignIn, null)
+                        onWidgetSync()
                     }
                     AuthEvent.MustChangePassword -> {
                         val current = (_bootstrap.value as? BootstrapState.Ready)?.session
@@ -154,6 +164,7 @@ class SessionBootstrapViewModel(
         if (inviteLinks != null) {
             viewModelScope.launch {
                 inviteLinks.collect { uri ->
+                    (inviteLinks as? MutableSharedFlow<Uri>)?.resetReplayCache()
                     val parsed = parseInviteDeepLink(uri) ?: return@collect
                     val currentSession = (_bootstrap.value as? BootstrapState.Ready)?.session
                     _bootstrap.value = BootstrapState.Ready(
@@ -165,17 +176,18 @@ class SessionBootstrapViewModel(
         }
     }
 
-    private suspend fun handleSsoCallback(uri: Uri) {
-        val errParam = uri.getQueryParameter("error")
-        if (!errParam.isNullOrBlank()) {
-            pendingSsoVerifier = null
-            _ssoError.value = errParam
+    internal suspend fun handleSsoCallbackParams(code: String?, errParam: String?) {
+        val verifier = pendingSsoVerifier
+        if (verifier.isNullOrBlank()) {
+            // Ignore unsolicited external sso/callback intents when no SSO sign-in is in flight.
             return
         }
-        val code = uri.getQueryParameter("code")
-        val verifier = pendingSsoVerifier
         pendingSsoVerifier = null
-        if (code.isNullOrBlank() || verifier.isNullOrBlank()) {
+        if (!errParam.isNullOrBlank()) {
+            _ssoError.value = mapSsoErrorMessage(errParam)
+            return
+        }
+        if (code.isNullOrBlank()) {
             _ssoError.value = "Single sign-in session could not be verified. Try again."
             return
         }
@@ -196,31 +208,48 @@ class SessionBootstrapViewModel(
         }
     }
 
+    private suspend fun handleSsoCallback(uri: Uri) {
+        handleSsoCallbackParams(
+            code = uri.getQueryParameter("code"),
+            errParam = uri.getQueryParameter("error"),
+        )
+    }
+
     fun clearSsoError() {
         _ssoError.value = null
     }
 
     fun refreshSession() {
+        refreshSessionInternal(syncWidgetsOnLogin = false)
+    }
+
+    private fun refreshSessionInternal(syncWidgetsOnLogin: Boolean) {
         viewModelScope.launch {
-            _bootstrap.value = BootstrapState.Loading
-            val stored = sessionStorage.awaitLoaded()
-            if (stored.sessionToken.isNullOrBlank()) {
-                val info = runCatching { api.getSession() }.getOrNull()
-                _bootstrap.value = BootstrapState.Ready(AppRoute.SignIn, info)
-                return@launch
-            }
-            runCatching { api.getSession() }
-                .onSuccess { session ->
-                    if (!session.loggedIn) {
-                        sessionStorage.clearSessionToken()
-                        _bootstrap.value = BootstrapState.Ready(AppRoute.SignIn, session)
-                    } else {
-                        _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, stored.lastGatePhone), session)
+            runCatching { Trace.beginSection("Doorking:refreshSession") }
+            try {
+                _bootstrap.value = BootstrapState.Loading
+                val stored = sessionStorage.awaitLoaded()
+                if (stored.sessionToken.isNullOrBlank()) {
+                    val info = runCatching { api.getSession() }.getOrNull()
+                    _bootstrap.value = BootstrapState.Ready(AppRoute.SignIn, info)
+                    return@launch
+                }
+                runCatching { api.getSession() }
+                    .onSuccess { session ->
+                        if (!session.loggedIn) {
+                            sessionStorage.clearSessionToken()
+                            _bootstrap.value = BootstrapState.Ready(AppRoute.SignIn, session)
+                        } else {
+                            _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, stored.lastGatePhone), session)
+                            if (syncWidgetsOnLogin) onWidgetSync()
+                        }
                     }
-                }
-                .onFailure { err ->
-                    _bootstrap.value = BootstrapState.OfflineError(ApiClientFactory.parseErrorMessage(err))
-                }
+                    .onFailure { err ->
+                        _bootstrap.value = BootstrapState.OfflineError(ApiClientFactory.parseErrorMessage(err))
+                    }
+            } finally {
+                runCatching { Trace.endSection() }
+            }
         }
     }
 
@@ -299,23 +328,76 @@ class SessionBootstrapViewModel(
         _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, session.gate?.phoneNumber), session)
     }
 
+    /**
+     * Previews an invitation against [serverUrl] without mutating `sessionStorage.serverUrl` or
+     * attaching the user's existing Bearer session token.
+     */
     suspend fun checkInvite(serverUrl: String, token: String): Result<InviteCheckResponse> = runCatching {
-        sessionStorage.setServerUrl(serverUrl)
-        val res = api.checkInvite(InviteCheckRequest(token = token))
+        val targetUrl = "${serverUrl.trimEnd('/')}/api/invite/check"
+        val res = api.checkInviteAtUrl(targetUrl, InviteCheckRequest(token = token))
         if (!res.isSuccessful) error(parseErrorBody(res.errorBody()?.string(), res.code(), "Invalid invitation link"))
         res.body() ?: error("Empty invitation response")
     }
 
-    suspend fun acceptInvite(serverUrl: String, token: String, password: String): Result<Unit> = runCatching {
+    /**
+     * Clears any prior session, switches `serverUrl` to the invite host, and activates the invited account.
+     * Leaves the active route on [AppRoute.AcceptInvite] so post-invite security onboarding (passkey and
+     * fingerprint lock) can complete before [completeInviteOnboarding] enters the app.
+     */
+    suspend fun acceptInvite(serverUrl: String, token: String, password: String): Result<SessionResponse> = runCatching {
+        if (!sessionStorage.currentSessionToken().isNullOrBlank()) {
+            runCatching { onBeforeSignOut() }
+            runCatching { api.signOut() }
+            sessionStorage.clearSessionToken()
+        }
         sessionStorage.setServerUrl(serverUrl)
         val res = api.acceptInvite(AcceptInviteRequest(token = token, password = password))
         if (!res.isSuccessful) error(parseErrorBody(res.errorBody()?.string(), res.code(), "Could not accept invitation"))
         val sessionToken = res.body()?.sessionToken
             ?: error("Server did not return a native session token.")
         sessionStorage.saveSessionToken(sessionToken)
-        val session = api.getSession()
-        _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, session.gate?.phoneNumber), session)
-        onWidgetSync()
+        api.getSession()
+    }
+
+    /**
+     * Registers a passkey right after invite acceptance while the fresh session does not require step-up.
+     * Returns `Result.success(true)` when saved, `Result.success(false)` if the user cancelled Credential Manager,
+     * or `Result.failure` on network/authenticator errors.
+     */
+    suspend fun registerPasskeyAfterInvite(
+        activityContext: Context,
+        label: String = defaultPasskeyLabel(),
+    ): Result<Boolean> = runCatching {
+        val optRes = api.getPasskeyRegistrationOptions()
+        if (!optRes.isSuccessful) {
+            error(parseErrorBody(optRes.errorBody()?.string(), optRes.code(), "Could not start passkey setup"))
+        }
+        val optionsJson = optRes.body()?.toString() ?: error("Empty passkey options")
+        when (val created = passkeyAuthenticator.register(activityContext, optionsJson)) {
+            PasskeyResult.Cancelled -> false
+            is PasskeyResult.Error -> error(created.message)
+            is PasskeyResult.Success -> {
+                val payload = ApiClientFactory.json.parseToJsonElement(created.assertionJson)
+                val saveRes = api.addPasskey(
+                    PasskeyRegistrationRequest(
+                        name = label.trim().take(40).ifBlank { "Android device" },
+                        response = payload,
+                    ),
+                )
+                if (!saveRes.isSuccessful) {
+                    error(parseErrorBody(saveRes.errorBody()?.string(), saveRes.code(), "Could not save passkey"))
+                }
+                true
+            }
+        }
+    }
+
+    suspend fun enableBiometricLock() {
+        sessionStorage.setBiometricLockEnabled(true)
+    }
+
+    fun completeInviteOnboarding() {
+        refreshSessionInternal(syncWidgetsOnLogin = true)
     }
 
     fun cancelInvite() {
@@ -323,7 +405,7 @@ class SessionBootstrapViewModel(
     }
 
     suspend fun completePasskeyStepUp(activityContext: Context): Result<Boolean> = runCatching {
-        val optRes = api.getStepUpOptions()
+        val optRes = stepUpApi.getStepUpOptions()
         if (!optRes.isSuccessful) error(parseErrorBody(optRes.errorBody()?.string(), optRes.code(), "Step-up passkey unavailable"))
         val optionsJson = optRes.body()?.toString() ?: error("Empty step-up options")
         when (val auth = passkeyAuthenticator.authenticate(activityContext, optionsJson)) {
@@ -331,7 +413,7 @@ class SessionBootstrapViewModel(
             is PasskeyResult.Error -> error(auth.message)
             is PasskeyResult.Success -> {
                 val assertionElement = ApiClientFactory.json.parseToJsonElement(auth.assertionJson)
-                val confirmRes = api.confirmStepUp(PasskeyAssertionRequest(response = assertionElement))
+                val confirmRes = stepUpApi.confirmStepUp(PasskeyAssertionRequest(response = assertionElement))
                 if (!confirmRes.isSuccessful) error(parseErrorBody(confirmRes.errorBody()?.string(), confirmRes.code(), "Passkey confirmation refused"))
                 true
             }
@@ -339,7 +421,7 @@ class SessionBootstrapViewModel(
     }
 
     suspend fun completePasswordStepUp(password: String): Result<Boolean> = runCatching {
-        val confirmRes = api.confirmStepUpWithPassword(StepUpPasswordRequest(password = password))
+        val confirmRes = stepUpApi.confirmStepUpWithPassword(StepUpPasswordRequest(password = password))
         if (!confirmRes.isSuccessful) error(parseErrorBody(confirmRes.errorBody()?.string(), confirmRes.code(), "Password confirmation refused"))
         true
     }
@@ -354,9 +436,7 @@ class SessionBootstrapViewModel(
         val existingId = sessionStorage.state.value.biometricKeyId
         if (!existingId.isNullOrBlank() && BiometricKeyManager.initSigningCrypto() != null) return
         runCatching {
-            val mat = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                BiometricKeyManager.generateFreshKey()
-            }
+            val mat = BiometricKeyManager.generateFreshKey()
             val res = api.registerBiometricKey(
                 RegisterBiometricKeyRequest(
                     keyId = mat.keyId,
@@ -373,7 +453,7 @@ class SessionBootstrapViewModel(
     suspend fun requestBiometricStepUpChallenge(): Result<Pair<String, String>> = runCatching {
         val keyId = sessionStorage.state.value.biometricKeyId?.takeIf { it.isNotBlank() }
             ?: error("Fingerprint step-up key not registered on this device")
-        val res = api.getBiometricStepUpChallenge(BiometricChallengeRequest(keyId = keyId))
+        val res = stepUpApi.getBiometricStepUpChallenge(BiometricChallengeRequest(keyId = keyId))
         if (!res.isSuccessful) {
             if (res.code() == 404) {
                 sessionStorage.setBiometricKeyId(null)
@@ -386,7 +466,7 @@ class SessionBootstrapViewModel(
     }
 
     suspend fun submitSignedBiometricStepUp(keyId: String, challenge: String, signatureBase64: String): Result<Boolean> = runCatching {
-        val confirmRes = api.confirmStepUpWithBiometric(
+        val confirmRes = stepUpApi.confirmStepUpWithBiometric(
             StepUpBiometricSignedRequest(
                 biometricKeyId = keyId,
                 challenge = challenge,
@@ -468,6 +548,23 @@ class SessionBootstrapViewModel(
     }
 
     companion object {
+        internal fun defaultPasskeyLabel(): String =
+            listOfNotNull(Build.MANUFACTURER?.trim(), Build.MODEL?.trim())
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
+                .ifBlank { "Android device" }
+
+        internal fun mapSsoErrorMessage(rawError: String?): String = when (rawError?.trim()?.lowercase()) {
+            "access_denied", "cancelled", "canceled" -> "Single sign-in was cancelled."
+            "invalid_request", "invalid_state", "state_mismatch" -> "Single sign-in session expired. Try again."
+            "unauthorized", "forbidden", "no_account", "user_not_found" ->
+                "Your account is not authorized on this DoorKing server."
+            "server_error", "temporarily_unavailable" ->
+                "The identity provider is temporarily unavailable. Try again."
+            "provider_disabled", "sso_disabled" -> "Single sign-on is disabled on this server."
+            else -> "Single sign-in failed. Please try again."
+        }
+
         private fun parseErrorBody(raw: String?, code: Int, fallback: String): String {
             if (!raw.isNullOrBlank()) {
                 val parsed = runCatching { ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw) }.getOrNull()
@@ -503,6 +600,7 @@ class SessionBootstrapViewModel(
                     onBeforeSignOut = {
                         FirebaseHelper.unregisterCurrentDevice(container.appContext, container.api)
                     },
+                    stepUpApi = container.stepUpApi,
                 ) as T
         }
     }
@@ -516,6 +614,9 @@ fun DoorkingNavRoot(container: AppContainer) {
     val storedAuth by container.sessionStorage.state.collectAsStateWithLifecycle()
     val pendingStepUp by container.stepUpCoordinator.pending.collectAsStateWithLifecycle()
     val backStack = remember { mutableStateListOf<AppRoute>(AppRoute.Splash) }
+    val currentSession = (bootstrap as? BootstrapState.Ready)?.session
+
+    ReportDrawnWhen { bootstrap !is BootstrapState.Loading }
 
     LaunchedEffect(bootstrap) {
         when (val state = bootstrap) {
@@ -530,16 +631,19 @@ fun DoorkingNavRoot(container: AppContainer) {
                     backStack.clear()
                     backStack.add(state.startRoute)
                 }
-                if (state.session?.loggedIn == true) {
-                    FirebaseHelper.registerCurrentDevice(
-                        context = container.appContext,
-                        api = container.api,
-                        sessionStorage = container.sessionStorage,
-                    )
-                    vm.ensureBiometricKeyRegistered(container.appContext)
-                }
             }
             is BootstrapState.OfflineError -> Unit
+        }
+    }
+
+    LaunchedEffect(currentSession?.loggedIn, currentSession?.user) {
+        if (currentSession?.loggedIn == true) {
+            FirebaseHelper.registerCurrentDevice(
+                context = container.appContext,
+                api = container.api,
+                sessionStorage = container.sessionStorage,
+            )
+            vm.ensureBiometricKeyRegistered(container.appContext)
         }
     }
 
@@ -589,8 +693,6 @@ fun DoorkingNavRoot(container: AppContainer) {
         return
     }
 
-    val currentSession = (bootstrap as? BootstrapState.Ready)?.session
-
     NavDisplay(
         backStack = backStack,
         onBack = {
@@ -620,8 +722,12 @@ fun DoorkingNavRoot(container: AppContainer) {
                     AcceptInviteScreen(
                         serverUrl = key.serverUrl,
                         token = key.token,
+                        signedInUser = currentSession?.takeIf { it.loggedIn }?.user,
                         onCheckInvite = vm::checkInvite,
                         onAcceptInvite = vm::acceptInvite,
+                        onRegisterPasskey = { ctx -> vm.registerPasskeyAfterInvite(ctx) },
+                        onEnableBiometricLock = vm::enableBiometricLock,
+                        onComplete = vm::completeInviteOnboarding,
                         onCancel = vm::cancelInvite,
                     )
                 }
@@ -690,15 +796,21 @@ private fun StepUpConfirmationDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val biometricAvailable = remember(context, biometricKeyId) {
-        !biometricKeyId.isNullOrBlank() &&
-            BiometricUnlockManager.isStrongBiometricAvailable(context) &&
-            BiometricUnlockManager.findFragmentActivity(context) != null &&
-            BiometricKeyManager.initSigningCrypto() != null
+    val biometricAvailable by produceState(initialValue = false, context, biometricKeyId) {
+        value = if (biometricKeyId.isNullOrBlank() || BiometricUnlockManager.findFragmentActivity(context) == null) {
+            false
+        } else {
+            withContext(Dispatchers.IO) {
+                BiometricUnlockManager.isStrongBiometricAvailable(context) &&
+                    BiometricKeyManager.initSigningCrypto() != null
+            }
+        }
     }
     val hasPasskey = pending.error.hasPasskey
     val canUsePassword = pending.error.canUsePassword
-    var usePasswordMode by remember(pending, biometricAvailable) { mutableStateOf(!biometricAvailable && !hasPasskey && canUsePassword) }
+    var usePasswordMode by remember(pending, biometricAvailable) {
+        mutableStateOf(!biometricAvailable && !hasPasskey && canUsePassword)
+    }
     var password by remember(pending) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }

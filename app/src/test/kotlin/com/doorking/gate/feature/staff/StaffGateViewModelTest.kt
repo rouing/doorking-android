@@ -9,6 +9,7 @@ import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -21,10 +22,12 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class StaffGateViewModelTest {
@@ -194,5 +197,56 @@ class StaffGateViewModelTest {
         assertFalse(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "102", name = "", phone = "", entryCode = "", cards = emptyList())))
         assertTrue(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "101", name = "Alice", type = "Resident")))
         assertTrue(isVisibleDirectoryRow(ResidentRowDto(directoryCode = "020", name = "", cards = listOf("19917"))))
+    }
+
+    @Test
+    fun jobPollingPausesWhenInactiveAndCapsConsecutiveErrors() = runBlocking {
+        val jobCalls = AtomicInteger(0)
+        val failJobs = AtomicInteger(0)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/gates/2145550100/residents" -> json(
+                    200,
+                    """{"rows":[],"cache":{"exists":true,"edited":false,"conflicts":[]}}""",
+                )
+                request.path!!.startsWith("/api/gates/2145550100/data") -> json(
+                    200,
+                    """{"transactions":{"updated":"2026-11-22T00:00:00Z","rows":[],"next":null}}""",
+                )
+                request.path == "/api/gates/2145550100/prefs" -> json(200, """{}""")
+                request.path == "/api/gates/2145550100/cameras" -> json(200, """{"settings":null}""")
+                request.path == "/api/gates/2145550100/snapshots" -> json(200, """{"snapshots":{}}""")
+                request.path == "/api/gates/2145550100/job" -> {
+                    jobCalls.incrementAndGet()
+                    if (failJobs.get() > 0) {
+                        json(500, """{"error":"server error"}""")
+                    } else {
+                        json(200, """{"state":"running","what":"residents","log":["Working…"]}""")
+                    }
+                }
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"5".repeat(64)}")
+        val api = ApiClientFactory.createApi(
+            ApiClientFactory.createOkHttp(storage, AuthEventBus()),
+            baseUrl = "$baseUrl/",
+        )
+
+        val vm = StaffGateViewModel("2145550100", api, storage, pollIntervalMs = 15L, snapPollIntervalMs = 15L)
+        withTimeout(5_000) { vm.uiState.first { !it.loading && it.job?.state == "running" } }
+
+        vm.setActive(false)
+        val countWhenPaused = jobCalls.get()
+        delay(80L)
+        assertTrue(jobCalls.get() <= countWhenPaused + 1)
+
+        failJobs.set(1)
+        vm.setActive(true)
+        val errored = withTimeout(5_000) { vm.uiState.first { it.error != null } }
+        assertNotNull(errored.error)
+        assertTrue(errored.error!!.contains("Lost connection"))
     }
 }

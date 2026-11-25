@@ -2,9 +2,12 @@ package com.doorking.gate.feature.admin
 
 import android.Manifest
 import android.app.StatusBarManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -30,6 +33,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.MarkEmailRead
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.OpenInBrowser
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.AlertDialog
@@ -59,6 +63,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.auth.BiometricUnlockManager
+import com.doorking.gate.core.auth.DEFAULT_SERVER_URL
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.SessionStorage
@@ -69,6 +74,7 @@ import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.ChangePasswordRequest
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.FcmTokenInfoDto
+import com.doorking.gate.core.network.FcmTokensReply
 import com.doorking.gate.core.network.MeProfileDto
 import com.doorking.gate.core.network.PasskeyInfoDto
 import com.doorking.gate.core.network.PasskeyRegistrationRequest
@@ -89,9 +95,29 @@ import com.doorking.gate.tile.GateRelayTileManager
 import com.doorking.gate.widget.GateWidgetUpdater
 import com.doorking.gate.widget.RelayWidgetPinHelper
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+
+private data class AccountLoadBundle(
+    val me: MeProfileDto,
+    val passkeys: List<PasskeyInfoDto>,
+    val fcm: FcmTokensReply?,
+    val webPush: List<WebPushSubDto>,
+    val aiClients: List<AiClientSessionDto>,
+)
+
+private suspend inline fun <T> safeAccountCall(block: () -> T): T? =
+    try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -136,6 +162,21 @@ fun AccountSettingsScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val sessionState = if (sessionStorage != null) {
+        sessionStorage.state.collectAsStateWithLifecycle().value
+    } else {
+        null
+    }
+    val firebaseReady = remember(context) { FirebaseHelper.isAvailable(context) }
+    val serverUrl = sessionState?.serverUrl?.takeIf { it.isNotBlank() } ?: DEFAULT_SERVER_URL
+    val privacyUri = remember(serverUrl) {
+        val parsed = Uri.parse("${serverUrl.trimEnd('/')}/privacy")
+        if (parsed.scheme.equals("https", ignoreCase = true) && !parsed.host.isNullOrBlank()) {
+            parsed
+        } else {
+            null
+        }
+    }
 
     fun parseApiError(raw: String?, code: Int, fallback: String): String {
         if (!raw.isNullOrBlank()) {
@@ -145,7 +186,7 @@ fun AccountSettingsScreen(
         return "$fallback (HTTP $code)"
     }
 
-    fun syncTilesFromProfile(me: MeProfileDto) {
+    suspend fun syncTilesFromProfile(me: MeProfileDto) {
         val visibleTiles = buildList {
             me.portalRelays.forEach { group ->
                 val unitCode = me.linkedUnits.firstOrNull { it.gatePhone == group.phone }?.directoryCode
@@ -165,49 +206,48 @@ fun AccountSettingsScreen(
         GateRelayTileManager.syncVisibleRelays(context, visibleTiles)
     }
 
-    fun load(initial: Boolean = false) {
+    suspend fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         notificationPermGranted = FirebaseHelper.hasNotificationPermission(context)
-        scope.launch {
-            runCatching {
-                val me = api.getMe()
-                val pks = runCatching { api.listPasskeys().passkeys }.getOrDefault(emptyList())
-                val fcm = runCatching { api.getFcmTokens() }.getOrNull()
-                val webPush = runCatching { api.getWebPushSubscriptions().subscriptions }.getOrDefault(emptyList())
-                val ai = runCatching { api.listAiClients().clients }.getOrDefault(emptyList())
-                listOf(me, pks, fcm, webPush, ai)
+        runCatching {
+            coroutineScope {
+                val meDef = async { api.getMe() }
+                val pksDef = async { safeAccountCall { api.listPasskeys().passkeys } ?: emptyList() }
+                val fcmDef = async { safeAccountCall { api.getFcmTokens() } }
+                val webPushDef = async { safeAccountCall { api.getWebPushSubscriptions().subscriptions } ?: emptyList() }
+                val aiDef = async { safeAccountCall { api.listAiClients().clients } ?: emptyList() }
+                AccountLoadBundle(
+                    me = meDef.await(),
+                    passkeys = pksDef.await(),
+                    fcm = fcmDef.await(),
+                    webPush = webPushDef.await(),
+                    aiClients = aiDef.await(),
+                )
             }
-                .onSuccess { results ->
-                    val me = results[0] as MeProfileDto
-                    @Suppress("UNCHECKED_CAST")
-                    val pks = results[1] as List<PasskeyInfoDto>
-                    val fcm = results[2] as com.doorking.gate.core.network.FcmTokensReply?
-                    @Suppress("UNCHECKED_CAST")
-                    val webPush = results[3] as List<WebPushSubDto>
-                    @Suppress("UNCHECKED_CAST")
-                    val ai = results[4] as List<AiClientSessionDto>
-                    profile = me
-                    syncTilesFromProfile(me)
-                    passkeys = pks
-                    if (fcm != null) {
-                        fcmServerEnabled = fcm.enabled
-                        fcmTokens = fcm.tokens
-                    }
-                    webPushSubs = webPush
-                    aiClients = ai
-                    email = me.pendingEmail.ifBlank { me.email }
-                    phone = me.phone
-                    notifyAccess = me.notifyAccess
-                    notifyAlerts = me.notifyAlerts
-                    loading = false
-                    refreshing = false
-                }
-                .onFailure {
-                    error = ApiClientFactory.parseErrorMessage(it)
-                    loading = false
-                    refreshing = false
-                }
         }
+            .onSuccess { bundle ->
+                profile = bundle.me
+                syncTilesFromProfile(bundle.me)
+                passkeys = bundle.passkeys
+                if (bundle.fcm != null) {
+                    fcmServerEnabled = bundle.fcm.enabled
+                    fcmTokens = bundle.fcm.tokens
+                }
+                webPushSubs = bundle.webPush
+                aiClients = bundle.aiClients
+                email = bundle.me.pendingEmail.ifBlank { bundle.me.email }
+                phone = bundle.me.phone
+                notifyAccess = bundle.me.notifyAccess
+                notifyAlerts = bundle.me.notifyAlerts
+                loading = false
+                refreshing = false
+            }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     fun registerThisDeviceFcm() {
@@ -215,6 +255,7 @@ fun AccountSettingsScreen(
         error = null
         scope.launch {
             runCatching {
+                FirebaseHelper.enablePushAutoInit(context)
                 val token = FirebaseHelper.fetchFcmToken(context)
                     ?: error("Firebase push token is unavailable on this build/device.")
                 val res = api.registerFcmToken(
@@ -395,7 +436,7 @@ fun AccountSettingsScreen(
 
     PullToRefreshBox(
         isRefreshing = refreshing,
-        onRefresh = { load(initial = false) },
+        onRefresh = { scope.launch { load(initial = false) } },
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -405,9 +446,13 @@ fun AccountSettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
+            if (error != null) {
+                item(key = "err", contentType = "error") {
+                    ErrorBanner(error!!, onRetry = { scope.launch { load(initial = false) } })
+                }
+            }
 
-            item(key = "appearance") {
+            item(key = "appearance", contentType = "appearance") {
                 SectionCard(title = "Appearance", tonal = true) {
                     Text(
                         text = "Signed in as ${profile?.username.orEmpty()}",
@@ -420,7 +465,7 @@ fun AccountSettingsScreen(
 
             val portalRelayGroups = profile?.portalRelays.orEmpty()
             if (portalRelayGroups.isNotEmpty()) {
-                item(key = "portal_relays") {
+                item(key = "portal_relays", contentType = "portal_relays") {
                     val canPinWidget = remember(context) { RelayWidgetPinHelper.canPin(context) }
                     val visibleTileSlotByKey = remember(portalRelayGroups) {
                         val map = linkedMapOf<Pair<String, Int>, Int>()
@@ -467,20 +512,22 @@ fun AccountSettingsScreen(
                                     if (tileSlot != null) {
                                         IconButton(
                                             onClick = {
-                                                profile?.let(::syncTilesFromProfile)
-                                                val started = GateRelayTileManager.requestAddTile(
-                                                    context = context,
-                                                    slotIndex = tileSlot,
-                                                ) { resultCode ->
-                                                    when (resultCode) {
-                                                        StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ->
-                                                            onMessage("Added $relayLabel to Quick Settings.")
-                                                        StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ->
-                                                            onMessage("$relayLabel is already in Quick Settings.")
+                                                scope.launch {
+                                                    profile?.let { syncTilesFromProfile(it) }
+                                                    val started = GateRelayTileManager.requestAddTile(
+                                                        context = context,
+                                                        slotIndex = tileSlot,
+                                                    ) { resultCode ->
+                                                        when (resultCode) {
+                                                            StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ->
+                                                                onMessage("Added $relayLabel to Quick Settings.")
+                                                            StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ->
+                                                                onMessage("$relayLabel is already in Quick Settings.")
+                                                        }
                                                     }
-                                                }
-                                                if (!started) {
-                                                    onMessage("Add the $relayLabel tile from Android Quick Settings edit mode.")
+                                                    if (!started) {
+                                                        onMessage("Add the $relayLabel tile from Android Quick Settings edit mode.")
+                                                    }
                                                 }
                                             },
                                         ) {
@@ -529,8 +576,8 @@ fun AccountSettingsScreen(
                                             }
                                             val updatedProfile = profile?.copy(hiddenRelays = currentHidden, portalRelays = nextGroups)
                                             profile = updatedProfile
-                                            updatedProfile?.let(::syncTilesFromProfile)
                                             scope.launch {
+                                                updatedProfile?.let { syncTilesFromProfile(it) }
                                                 val body = buildJsonObject {
                                                     put(
                                                         "hiddenRelays",
@@ -566,7 +613,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "email") {
+            item(key = "email", contentType = "email") {
                 SectionCard(
                     title = "Email",
                     tonal = true,
@@ -656,7 +703,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "phone") {
+            item(key = "phone", contentType = "phone") {
                 SectionCard(title = if (hasLinkedUnits) "Call-box phone number" else "Phone", tonal = true) {
                     Text(
                         text = if (hasLinkedUnits) {
@@ -708,7 +755,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "notifications") {
+            item(key = "notifications", contentType = "notifications") {
                 SectionCard(title = "Email notifications", tonal = true) {
                     Text(
                         text = "Sent to your confirmed email. Security emails (password or passkey changes) are always sent.",
@@ -766,8 +813,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "push_fcm") {
-                val firebaseReady = FirebaseHelper.isAvailable(context)
+            item(key = "push_fcm", contentType = "push_fcm") {
                 val totalDevices = fcmTokens.size + webPushSubs.size
                 SectionCard(
                     title = "Push notifications",
@@ -943,17 +989,16 @@ fun AccountSettingsScreen(
                 }
             }
 
-            if (sessionStorage != null) {
-                item(key = "biometric_lock") {
-                    val stored by sessionStorage.state.collectAsStateWithLifecycle()
+            if (sessionStorage != null && sessionState != null) {
+                item(key = "biometric_lock", contentType = "biometric_lock") {
                     val biometricAvailable = remember(context) { BiometricUnlockManager.isAvailable(context) }
                     SectionCard(
                         title = "Fingerprint unlock",
                         tonal = true,
                         trailing = {
                             StatusPill(
-                                text = if (stored.biometricLockEnabled) "On" else "Off",
-                                tone = if (stored.biometricLockEnabled) PillTone.Success else PillTone.Neutral,
+                                text = if (sessionState.biometricLockEnabled) "On" else "Off",
+                                tone = if (sessionState.biometricLockEnabled) PillTone.Success else PillTone.Neutral,
                             )
                         },
                     ) {
@@ -970,7 +1015,7 @@ fun AccountSettingsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .toggleable(
-                                    value = stored.biometricLockEnabled,
+                                    value = sessionState.biometricLockEnabled,
                                     enabled = biometricAvailable,
                                     role = Role.Switch,
                                     onValueChange = { wantEnable ->
@@ -1010,7 +1055,7 @@ fun AccountSettingsScreen(
                                 modifier = Modifier.weight(1f),
                             )
                             Switch(
-                                checked = stored.biometricLockEnabled,
+                                checked = sessionState.biometricLockEnabled,
                                 enabled = biometricAvailable,
                                 onCheckedChange = null,
                             )
@@ -1019,7 +1064,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "ai_clients") {
+            item(key = "ai_clients", contentType = "ai_clients") {
                 SectionCard(
                     title = "Connected AI Clients",
                     tonal = true,
@@ -1108,7 +1153,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "passkeys") {
+            item(key = "passkeys", contentType = "passkeys") {
                 SectionCard(
                     title = "Passkeys",
                     tonal = true,
@@ -1171,7 +1216,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "password") {
+            item(key = "password", contentType = "password") {
                 SectionCard(title = "Change Password", tonal = true) {
                     PasswordOutlinedField(
                         value = currentPw,
@@ -1217,8 +1262,75 @@ fun AccountSettingsScreen(
                 }
             }
 
+            item(key = "privacy", contentType = "privacy") {
+                val showCrashDiagnostics = firebaseReady && sessionStorage != null && sessionState != null
+                SectionCard(
+                    title = if (showCrashDiagnostics) "Privacy & diagnostics" else "Privacy",
+                    tonal = true,
+                ) {
+                    if (firebaseReady && sessionStorage != null && sessionState != null) {
+                        val crashlyticsEnabled = sessionState.crashlyticsEnabled
+                        Text(
+                            text = "Optional. Share anonymous crash reports to help diagnose app bugs. No gate codes, credentials, or personal data are included. Off by default.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .toggleable(
+                                    value = crashlyticsEnabled,
+                                    role = Role.Switch,
+                                    onValueChange = { enabled ->
+                                        scope.launch {
+                                            sessionStorage.setCrashlyticsEnabled(enabled)
+                                            FirebaseHelper.setCrashlyticsOptIn(context, enabled)
+                                            onMessage(
+                                                if (enabled) "Anonymous crash diagnostics enabled."
+                                                else "Anonymous crash diagnostics disabled.",
+                                            )
+                                        }
+                                    },
+                                )
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Share anonymous crash diagnostics",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = crashlyticsEnabled,
+                                onCheckedChange = null,
+                            )
+                        }
+                    }
+                    FilledTonalButton(
+                        enabled = privacyUri != null,
+                        onClick = {
+                            privacyUri?.let { uri ->
+                                runCatching {
+                                    CustomTabsIntent.Builder().build().launchUrl(context, uri)
+                                }.recoverCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                }.onFailure { err ->
+                                    error = err.message ?: "Could not open privacy policy"
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Rounded.OpenInBrowser, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                        Text("Privacy Policy")
+                    }
+                }
+            }
+
             if (onSwitchToStaff != null) {
-                item(key = "switch-staff") {
+                item(key = "switch-staff", contentType = "switch_staff") {
                     FilledTonalButton(
                         onClick = onSwitchToStaff,
                         modifier = Modifier
@@ -1232,7 +1344,7 @@ fun AccountSettingsScreen(
                 }
             }
 
-            item(key = "signout") {
+            item(key = "signout", contentType = "signout") {
                 Button(
                     onClick = onSignOut,
                     colors = ButtonDefaults.buttonColors(

@@ -2,7 +2,13 @@ package com.doorking.gate.widget
 
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
+import com.doorking.gate.core.network.DoorkingAuthInterceptor
+import com.doorking.gate.core.network.StepUpCoordinator
 import com.doorking.gate.fakes.FakeSessionStorage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -11,9 +17,13 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class GateWidgetRepositoryTest {
 
@@ -176,6 +186,197 @@ class GateWidgetRepositoryTest {
                 WidgetRelayEntry(2, "Walk Gate"),
             ),
             snap.relays,
+        )
+    }
+
+    @Test
+    fun buzzSkipsInteractiveStepUpPromptAndReturnsFailureMessage() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/portal/gates/2145550100/buzz" -> json(
+                    403,
+                    """{"error":"Step-up confirmation required","stepUp":true}""",
+                )
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"8".repeat(64)}")
+        var stepUpPrompted = false
+        val interceptor = DoorkingAuthInterceptor(
+            sessionStorage = storage,
+            authEvents = AuthEventBus(),
+            json = ApiClientFactory.json,
+            stepUpCoordinator = StepUpCoordinator {
+                stepUpPrompted = true
+                false
+            },
+        )
+        val okHttp = ApiClientFactory.createOkHttp(storage, AuthEventBus(), authInterceptor = interceptor)
+        val api = ApiClientFactory.createApi(okHttp, "$baseUrl/")
+
+        val outcome = GateWidgetRepository.buzz(
+            api = api,
+            gatePhone = "2145550100",
+            relay = 0,
+            relayName = "Main Gate",
+            unitCode = "101",
+            noInteractiveStepUp = "1",
+        )
+        assertFalse("Background widget buzz must not trigger interactive step-up UI", stepUpPrompted)
+        assertTrue(outcome is WidgetBuzzOutcome.Failed)
+        assertTrue((outcome as WidgetBuzzOutcome.Failed).message.contains("Step-up"))
+    }
+
+    @Test
+    fun buzzReportsAlreadyOpenMessageCleanly() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/portal/gates/2145550100/buzz" -> json(
+                    200,
+                    """{"ok":true,"alreadyOpen":true}""",
+                )
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"9".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        val outcome = GateWidgetRepository.buzz(api, "2145550100", 0, "Main Gate", "101")
+        assertTrue(outcome is WidgetBuzzOutcome.Opened)
+        assertEquals("Main Gate already open", (outcome as WidgetBuzzOutcome.Opened).message)
+    }
+
+    @Test
+    fun fetchSnapshotClearsTokenWhenSessionReportsLoggedOut() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/session" -> json(200, """{"loggedIn":false,"user":""}""")
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"a".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        val snap = GateWidgetRepository.fetchSnapshot(storage, api)
+        assertFalse(snap.signedIn)
+        assertNull(storage.awaitLoaded().sessionToken)
+    }
+
+    @Test
+    fun pendingPinConfigRoundTripsThroughJson() {
+        val original = PendingPinConfig(
+            gatePhone = "2145550100",
+            gateName = "Oakridge",
+            relay = 2,
+            relayName = "Walk Gate",
+            unitCode = "101",
+            createdAtMs = 1_700_000_000_000L,
+        )
+        val encoded = ApiClientFactory.json.encodeToString(original)
+        val decoded = ApiClientFactory.json.decodeFromString<PendingPinConfig>(encoded)
+        assertEquals(original, decoded)
+    }
+
+    @Test
+    fun buzzPropagatesCancellationException() = runBlocking {
+        val requestStarted = CountDownLatch(1)
+        val releaseServer = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                requestStarted.countDown()
+                releaseServer.await(5, TimeUnit.SECONDS)
+                return json(200, """{"ok":true}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"b".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        var caughtCancellation = false
+        var returnedOutcome: WidgetBuzzOutcome? = null
+        val job = launch(Dispatchers.IO) {
+            try {
+                returnedOutcome = GateWidgetRepository.buzz(api, "2145550100", 0, "Main Gate", "101")
+            } catch (_: CancellationException) {
+                caughtCancellation = true
+            }
+        }
+        try {
+            assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertTrue("CancellationException must propagate instead of returning Failed", caughtCancellation)
+            assertNull(returnedOutcome)
+        } finally {
+            releaseServer.countDown()
+        }
+    }
+
+    @Test
+    fun resolveTinyTileStateUsesMutedStylingWhenSignedOutOrUnavailable() {
+        val signedOut = resolveTinyTileState(GateWidgetSnapshot(signedIn = false, canBuzz = false))
+        assertEquals(TinyTileStyle.MUTED, signedOut.style)
+        assertEquals("Sign in", signedOut.label)
+
+        val unavailable = resolveTinyTileState(
+            GateWidgetSnapshot(signedIn = true, canBuzz = false, statusText = "Busy 45%", buzzRelayName = "Main Gate"),
+        )
+        assertEquals(TinyTileStyle.MUTED, unavailable.style)
+        assertEquals("Busy 45%", unavailable.label)
+
+        val unavailableBlankStatus = resolveTinyTileState(
+            GateWidgetSnapshot(signedIn = true, canBuzz = false, statusText = "  ", buzzRelayName = "Main Gate"),
+        )
+        assertEquals(TinyTileStyle.MUTED, unavailableBlankStatus.style)
+        assertEquals("Gate", unavailableBlankStatus.label)
+
+        val active = resolveTinyTileState(
+            GateWidgetSnapshot(signedIn = true, canBuzz = true, buzzRelayName = "Main Gate"),
+        )
+        assertEquals(TinyTileStyle.ACTIVE, active.style)
+        assertEquals("Main Gate", active.label)
+
+        val busy = resolveTinyTileState(
+            GateWidgetSnapshot(signedIn = true, canBuzz = true, busy = true, buzzRelayName = "Main Gate"),
+        )
+        assertEquals(TinyTileStyle.BUSY, busy.style)
+        assertEquals("Opening…", busy.label)
+    }
+
+    @Test
+    fun decodeRelaysCachesParsedListAcrossRepeatedExactSizePasses() {
+        val raw = """[{"relay":0,"name":"Main Gate"},{"relay":1,"name":"Walk Gate"}]"""
+        val first = GateQuickWidget.decodeRelays(raw)
+        val second = GateQuickWidget.decodeRelays(raw)
+        assertEquals(
+            listOf(WidgetRelayEntry(0, "Main Gate"), WidgetRelayEntry(1, "Walk Gate")),
+            first,
+        )
+        assertSame("Identical raw JSON must reuse cached relay list instance", first, second)
+
+        val changed = GateQuickWidget.decodeRelays("""[{"relay":2,"name":"Side Gate"}]""")
+        assertEquals(listOf(WidgetRelayEntry(2, "Side Gate")), changed)
+
+        assertTrue(GateQuickWidget.decodeRelays(null).isEmpty())
+        assertTrue(GateQuickWidget.decodeRelays("   ").isEmpty())
+        assertTrue(GateQuickWidget.decodeRelays("not-json").isEmpty())
+    }
+
+    @Test
+    fun previewSnapshotContainsCleanSampleRelaysWithoutSideEffects() {
+        val preview = GateQuickWidget.previewSnapshot()
+        assertTrue(preview.signedIn)
+        assertTrue(preview.canBuzz)
+        assertEquals("", preview.gatePhone)
+        assertEquals(
+            listOf(WidgetRelayEntry(0, "Main Gate"), WidgetRelayEntry(1, "Walk Gate")),
+            preview.relays,
         )
     }
 }

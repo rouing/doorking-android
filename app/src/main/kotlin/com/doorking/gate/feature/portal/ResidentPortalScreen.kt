@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -82,6 +81,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,6 +91,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
@@ -126,9 +127,10 @@ fun ResidentPortalScreen(
     onSwitchToStaff: (() -> Unit)?,
     onSignOut: () -> Unit,
 ) {
+    val factory = remember(container, gatePhone) { ResidentPortalViewModel.factory(container, gatePhone) }
     val vm: ResidentPortalViewModel = viewModel(
         key = "portal-$gatePhone",
-        factory = ResidentPortalViewModel.factory(container, gatePhone),
+        factory = factory,
     )
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(PortalTab.Gate) }
@@ -136,6 +138,14 @@ fun ResidentPortalScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+
+    val pollGateStatus = tab == PortalTab.Gate
+    LifecycleStartEffect(vm, pollGateStatus) {
+        vm.setStatusPollingEnabled(pollGateStatus)
+        onStopOrDispose {
+            vm.setStatusPollingEnabled(false)
+        }
+    }
 
     LaunchedEffect(state.bannerMessage) {
         val msg = state.bannerMessage ?: return@LaunchedEffect
@@ -286,23 +296,7 @@ internal fun PortalGateTab(
     val me = state.me
     val haptic = LocalHapticFeedback.current
     val semantic = LocalDoorkingColors.current
-    var revealCode by remember(me?.unit?.directoryCode) { mutableStateOf(false) }
-    var revealSeconds by remember { mutableIntStateOf(0) }
     var confirmReroll by remember { mutableStateOf(false) }
-
-    // 30-second auto-remask matching the web portal's privacy behavior.
-    LaunchedEffect(revealCode) {
-        if (!revealCode) {
-            revealSeconds = 0
-            return@LaunchedEffect
-        }
-        revealSeconds = 30
-        while (revealSeconds > 0) {
-            delay(1_000L)
-            revealSeconds -= 1
-        }
-        revealCode = false
-    }
 
     if (confirmReroll) {
         AlertDialog(
@@ -326,12 +320,12 @@ internal fun PortalGateTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.error != null) {
-            item(key = "error") { ErrorBanner(state.error) }
+            item(key = "error", contentType = "error") { ErrorBanner(state.error) }
         }
         if (me == null) return@LazyColumn
 
         if (me.units.size > 1) {
-            item(key = "units") {
+            item(key = "units", contentType = "units") {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     me.units.forEach { u ->
                         FilterChip(
@@ -348,6 +342,7 @@ internal fun PortalGateTab(
             items(
                 items = me.portal.buzzRelayLabels,
                 key = { "buzz-${it.relay}" },
+                contentType = { "buzz_button" },
             ) { entry ->
                 val isBuzzing = state.buzzingRelay == entry.relay
                 val isBusy = !state.status.available
@@ -413,7 +408,7 @@ internal fun PortalGateTab(
             }
         }
 
-        item(key = "access") {
+        item(key = "access", contentType = "access") {
             SectionCard(
                 title = "My Gate Access",
                 tonal = true,
@@ -423,51 +418,11 @@ internal fun PortalGateTab(
                     }
                 },
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Entry code",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        val display = when {
-                            me.unit.entryCode.isBlank() -> "None assigned"
-                            revealCode -> "#${me.unit.entryCode}"
-                            else -> "#••••"
-                        }
-                        Text(
-                            text = display,
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                            ),
-                        )
-                        if (revealCode && revealSeconds > 0) {
-                            Text(
-                                text = "Hides automatically in ${revealSeconds}s",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    if (me.unit.entryCode.isNotBlank()) {
-                        Row {
-                            IconButton(onClick = { revealCode = !revealCode }) {
-                                Icon(
-                                    imageVector = if (revealCode) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                    contentDescription = if (revealCode) "Hide entry code" else "Reveal entry code",
-                                )
-                            }
-                            IconButton(onClick = { onCopyCode(me.unit.entryCode) }) {
-                                Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy entry code")
-                            }
-                        }
-                    }
-                }
+                EntryCodeRow(
+                    unitCode = me.unit.directoryCode,
+                    entryCode = me.unit.entryCode,
+                    onCopyCode = onCopyCode,
+                )
 
                 if (me.portal.maxRerollsPerDay > 0) {
                     FilledTonalButton(
@@ -498,15 +453,100 @@ internal fun PortalGateTab(
         }
 
         if (me.unit.cards.isNotEmpty()) {
-            item(key = "cards") {
+            item(key = "cards", contentType = "cards") {
+                val credentials = remember(me.unit.cards) {
+                    me.unit.cards.map { it.number to it.device }
+                }
                 AccessCredentialsSection(
                     title = "Assigned remotes & cards",
-                    credentials = me.unit.cards.map { it.number to it.device },
+                    credentials = credentials,
                     onCopyNumber = onCopyCode,
                     topLevel = true,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun EntryCodeRow(
+    unitCode: String,
+    entryCode: String,
+    onCopyCode: (String) -> Unit,
+) {
+    var revealCode by remember(unitCode) { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Entry code",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val display = when {
+                entryCode.isBlank() -> "None assigned"
+                revealCode -> "#$entryCode"
+                else -> "#••••"
+            }
+            Text(
+                text = display,
+                style = MaterialTheme.typography.headlineSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+            RevealCountdownLabel(
+                revealed = revealCode,
+                onExpired = { revealCode = false },
+            )
+        }
+        if (entryCode.isNotBlank()) {
+            Row {
+                IconButton(onClick = { revealCode = !revealCode }) {
+                    Icon(
+                        imageVector = if (revealCode) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                        contentDescription = if (revealCode) "Hide entry code" else "Reveal entry code",
+                    )
+                }
+                IconButton(onClick = { onCopyCode(entryCode) }) {
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy entry code")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Isolated 1 Hz countdown leaf so ticking 30s -> 0s recomposes only this label instead of the whole tab.
+ */
+@Composable
+private fun RevealCountdownLabel(
+    revealed: Boolean,
+    onExpired: () -> Unit,
+) {
+    if (!revealed) return
+    var revealSeconds by remember { mutableIntStateOf(30) }
+    val latestOnExpired by rememberUpdatedState(onExpired)
+
+    LaunchedEffect(Unit) {
+        revealSeconds = 30
+        while (revealSeconds > 0) {
+            delay(1_000L)
+            revealSeconds -= 1
+        }
+        latestOnExpired()
+    }
+
+    if (revealSeconds > 0) {
+        Text(
+            text = "Hides automatically in ${revealSeconds}s",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -568,13 +608,23 @@ private fun PortalActivityTab(
         )
     }
 
+    val keyedActivity = remember(state.activity) {
+        val seen = HashMap<String, Int>(state.activity.size)
+        state.activity.map { row ->
+            val baseKey = "${row.source ?: "gate"}-${row.txKey ?: "${row.ts}-${row.raw}"}"
+            val occurrence = seen[baseKey] ?: 0
+            seen[baseKey] = occurrence + 1
+            (if (occurrence == 0) baseKey else "$baseKey#$occurrence") to row
+        }
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (state.activity.isEmpty()) {
-            item(key = "empty") {
+        if (keyedActivity.isEmpty()) {
+            item(key = "empty", contentType = "empty") {
                 BubbleCard {
                     Text("No recent activity", style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -585,10 +635,11 @@ private fun PortalActivityTab(
                 }
             }
         } else {
-            itemsIndexed(
-                items = state.activity,
-                key = { index, it -> "$index-${it.source ?: "gate"}-${it.txKey ?: "${it.ts}-${it.raw}"}" },
-            ) { _, row ->
+            items(
+                items = keyedActivity,
+                key = { it.first },
+                contentType = { "activity_row" },
+            ) { (_, row) ->
                 val accessTone = when {
                     row.access.contains("Deny", ignoreCase = true) -> PillTone.Error
                     row.access.contains("Admit", ignoreCase = true) -> PillTone.Success
@@ -669,7 +720,7 @@ private fun PortalRequestsTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.me?.portal?.allowRequests == true) {
-            item(key = "form") {
+            item(key = "form", contentType = "request_form") {
                 SectionCard(title = "Request a Change", tonal = true) {
                     ExposedDropdownMenuBox(
                         expanded = kindExpanded,
@@ -728,7 +779,7 @@ private fun PortalRequestsTab(
         }
 
         if (state.requests.isEmpty()) {
-            item(key = "reqs-empty") {
+            item(key = "reqs-empty", contentType = "empty") {
                 BubbleCard {
                     Text("No requests yet", style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -743,7 +794,7 @@ private fun PortalRequestsTab(
                 }
             }
         }
-        items(items = state.requests, key = { it.id }) { req ->
+        items(items = state.requests, key = { it.id }, contentType = { "request_row" }) { req ->
             val tone = when (req.status) {
                 "approved" -> PillTone.Success
                 "rejected" -> PillTone.Error

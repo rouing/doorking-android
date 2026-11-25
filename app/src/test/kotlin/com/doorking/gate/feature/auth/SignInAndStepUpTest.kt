@@ -1,5 +1,6 @@
 package com.doorking.gate.feature.auth
 
+import com.doorking.gate.CrashStore
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.UiStepUpCoordinator
@@ -70,5 +71,40 @@ class SignInAndStepUpTest {
         assertNull(parseInviteDeepLink("https://gate.example.com", "short", allowLocalHttp = false))
         assertNull(parseInviteDeepLink("javascript:alert(1)", validToken, allowLocalHttp = false))
         assertNotNull(parseInviteDeepLink("http://10.0.2.2:8080", validToken, allowLocalHttp = true))
+    }
+
+    @Test
+    fun validatesExternalBrowserUrlsStrictly() {
+        assertTrue(isValidExternalBrowserUrl("https://accounts.google.com/o/oauth2/v2/auth?client_id=1", allowLocalHttp = false))
+        assertTrue(isValidExternalBrowserUrl("https://gate.example.com/privacy", allowLocalHttp = false))
+        assertFalse(isValidExternalBrowserUrl("http://gate.example.com/privacy", allowLocalHttp = false))
+        assertFalse(isValidExternalBrowserUrl("https://user:pass@gate.example.com/auth", allowLocalHttp = false))
+        assertFalse(isValidExternalBrowserUrl("javascript:alert(1)", allowLocalHttp = false))
+        assertFalse(isValidExternalBrowserUrl("intent://evil/#Intent;end", allowLocalHttp = false))
+        assertFalse(isValidExternalBrowserUrl("file:///etc/passwd", allowLocalHttp = false))
+        assertTrue(isValidExternalBrowserUrl("http://10.0.2.2:3000/privacy", allowLocalHttp = true))
+        assertFalse(isValidExternalBrowserUrl("http://10.0.2.2:3000/privacy", allowLocalHttp = false))
+    }
+
+    @Test
+    fun crashStoreScrubsTokensUrlsEmailsAndPhoneNumbers() {
+        val raw = """
+            Failed request to https://gate.example.com/api/gates/2145550100?token=secret123
+            Authorization: Bearer dks_${"a".repeat(64)}
+            User alice@example.com called (214) 555-0199 for gate 2145550100
+            at com.doorking.gate.MainActivity.onCreate(MainActivity.kt:123)
+        """.trimIndent()
+        val scrubbed = CrashStore.scrub(raw)
+        assertFalse(scrubbed.contains("secret123"))
+        assertFalse(scrubbed.contains("gate.example.com"))
+        assertFalse(scrubbed.contains("dks_"))
+        assertFalse(scrubbed.contains("alice@example.com"))
+        assertFalse(scrubbed.contains("2145550100"))
+        assertFalse(scrubbed.contains("555-0199"))
+        assertTrue(scrubbed.contains("[REDACTED_URL]"))
+        assertTrue(scrubbed.contains("Bearer [REDACTED]"))
+        assertTrue(scrubbed.contains("[REDACTED_EMAIL]"))
+        assertTrue(scrubbed.contains("[REDACTED_PHONE]"))
+        assertTrue(scrubbed.contains("MainActivity.kt:123"))
     }
 }

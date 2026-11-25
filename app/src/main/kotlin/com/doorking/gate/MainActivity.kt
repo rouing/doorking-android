@@ -38,13 +38,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,10 +70,12 @@ import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.theme.DoorkingTheme
 import com.doorking.gate.core.update.PlayInAppUpdateController
 import com.doorking.gate.navigation.DoorkingNavRoot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : FragmentActivity() {
     private val inAppUpdateLauncher = registerForActivityResult(
@@ -82,20 +86,18 @@ class MainActivity : FragmentActivity() {
     private val biometricUnlocked = MutableStateFlow(false)
     private val resumeTick = MutableStateFlow(0)
     private var backgroundedAtMs: Long = 0L
+    private var checkedUpdateInOnStart: Boolean = false
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val app = application as DoorkingApp
-        val serverUrl = if (app.startupCrash == null) app.container.sessionStorage.currentServerUrl() else com.doorking.gate.core.auth.DEFAULT_SERVER_URL
-        val previousCrash = app.startupCrash ?: CrashStore.read(this)
-        if (previousCrash != null) {
-            CrashStore.showInlineCrashView(this, previousCrash, serverUrl) { recreate() }
+        val startupCrash = app.startupCrash
+        if (startupCrash != null) {
+            CrashStore.showInlineCrashView(this, startupCrash, serverUrl = null) { recreate() }
             return
         }
-        // Flush any previously queued crash report if it failed to upload offline earlier.
-        CrashStore.uploadPendingAsync(this, serverUrl)
 
         handleSsoCallbackIntent(app, intent)
 
@@ -113,13 +115,27 @@ class MainActivity : FragmentActivity() {
                 val scope = rememberCoroutineScope()
                 var pendingApprovals by remember { mutableStateOf<List<PendingPasskeyApprovalDto>>(emptyList()) }
                 var approvalToast by remember { mutableStateOf<String?>(null) }
+                var lastApprovalFetchMs by remember { mutableLongStateOf(0L) }
+
+                // Check for a saved crash trace off the main thread so startup never blocks on disk I/O.
+                LaunchedEffect(Unit) {
+                    val previousCrash = withContext(Dispatchers.IO) { CrashStore.read(this@MainActivity) }
+                    if (previousCrash != null && !isFinishing && !isDestroyed) {
+                        val loaded = container.sessionStorage.awaitLoaded()
+                        CrashStore.showInlineCrashView(
+                            activity = this@MainActivity,
+                            trace = previousCrash,
+                            serverUrl = loaded.serverUrl,
+                        ) { recreate() }
+                    }
+                }
 
                 val darkTheme = when (authState.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
                     ThemeMode.DARK -> true
                 }
-                DisposableEffect(darkTheme) {
+                SideEffect {
                     enableEdgeToEdge(
                         statusBarStyle = SystemBarStyle.auto(
                             lightScrim = Color.TRANSPARENT,
@@ -132,14 +148,13 @@ class MainActivity : FragmentActivity() {
                             detectDarkMode = { darkTheme },
                         ),
                     )
-                    onDispose {}
                 }
 
                 // Only mark unlocked once DataStore has loaded; prevents cold-start race where initial
                 // empty StoredAuthState(loaded = false) would prematurely unlock before reading prefs.
                 val hasSession = !authState.sessionToken.isNullOrBlank()
-                LaunchedEffect(authState.loaded, hasSession, authState.biometricLockEnabled) {
-                    if (authState.loaded && (!hasSession || !authState.biometricLockEnabled)) {
+                SideEffect {
+                    if (authState.loaded && (!hasSession || !authState.biometricLockEnabled) && !biometricUnlocked.value) {
                         biometricUnlocked.value = true
                     }
                 }
@@ -152,6 +167,13 @@ class MainActivity : FragmentActivity() {
                 )
 
                 suspend fun fetchPendingApprovals(prioritizeId: String? = null) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (prioritizeId.isNullOrBlank() && lastApprovalFetchMs > 0L &&
+                        now - lastApprovalFetchMs < APPROVAL_FETCH_MIN_INTERVAL_MS
+                    ) {
+                        return
+                    }
+                    lastApprovalFetchMs = now
                     val list = runCatching { container.api.getPendingPasskeyApprovals().requests }
                         .getOrNull() ?: return
                     pendingApprovals = if (!prioritizeId.isNullOrBlank()) {
@@ -187,8 +209,12 @@ class MainActivity : FragmentActivity() {
 
                 DoorkingTheme(darkTheme = darkTheme) {
                     Box(modifier = Modifier.fillMaxSize()) {
-                        DoorkingNavRoot(container = container)
-                        if (locked) {
+                        if (!authState.loaded) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize(),
+                                color = MaterialTheme.colorScheme.surface,
+                            ) {}
+                        } else if (locked) {
                             BiometricLockOverlay(
                                 activity = this@MainActivity,
                                 onUnlocked = { biometricUnlocked.value = true },
@@ -201,74 +227,76 @@ class MainActivity : FragmentActivity() {
                                     }
                                 },
                             )
-                        }
-                        val activeApproval = pendingApprovals.firstOrNull()
-                        if (activeApproval != null && hasSession && !locked) {
-                            PasskeyApprovalDialog(
-                                activity = this@MainActivity,
-                                request = activeApproval,
-                                biometricKeyId = authState.biometricKeyId,
-                                onRespond = { body ->
-                                    val res = container.api.respondPasskeyApproval(activeApproval.id, body)
-                                    if (!res.isSuccessful) {
-                                        val raw = res.errorBody()?.string().orEmpty()
-                                        val parsed = runCatching {
-                                            ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw)
-                                        }.getOrNull()
-                                        val msg = parsed?.error?.takeIf { it.isNotBlank() }
-                                            ?: "Request failed (HTTP ${res.code()})"
-                                        if (res.code() == 404 || res.code() == 410) {
-                                            pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
+                        } else {
+                            DoorkingNavRoot(container = container)
+                            val activeApproval = pendingApprovals.firstOrNull()
+                            if (activeApproval != null && hasSession) {
+                                PasskeyApprovalDialog(
+                                    activity = this@MainActivity,
+                                    request = activeApproval,
+                                    biometricKeyId = authState.biometricKeyId,
+                                    onRespond = { body ->
+                                        val res = container.api.respondPasskeyApproval(activeApproval.id, body)
+                                        if (!res.isSuccessful) {
+                                            val raw = res.errorBody()?.string().orEmpty()
+                                            val parsed = runCatching {
+                                                ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw)
+                                            }.getOrNull()
+                                            val msg = parsed?.error?.takeIf { it.isNotBlank() }
+                                                ?: "Request failed (HTTP ${res.code()})"
+                                            if (res.code() == 404 || res.code() == 410) {
+                                                pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
+                                            }
+                                            error(msg)
                                         }
-                                        error(msg)
-                                    }
-                                    val tag = "passkey-approval-${activeApproval.id}"
-                                    NotificationManagerCompat.from(this@MainActivity).cancel(tag, tag.hashCode())
-                                    pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
-                                    approvalToast = if (body.decision == "approve") {
-                                        "Passkey approval sent."
-                                    } else {
-                                        "Passkey request denied."
-                                    }
-                                },
-                                onDismissLocal = {
-                                    pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
-                                },
-                            )
-                        }
-                        if (approvalToast != null && !locked) {
-                            Snackbar(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .navigationBarsPadding()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                            ) {
-                                Text(approvalToast!!)
+                                        val tag = "passkey-approval-${activeApproval.id}"
+                                        NotificationManagerCompat.from(this@MainActivity).cancel(tag, tag.hashCode())
+                                        pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
+                                        approvalToast = if (body.decision == "approve") {
+                                            "Passkey approval sent."
+                                        } else {
+                                            "Passkey request denied."
+                                        }
+                                    },
+                                    onDismissLocal = {
+                                        pendingApprovals = pendingApprovals.filterNot { it.id == activeApproval.id }
+                                    },
+                                )
                             }
-                        }
-                        if (updateReady && !locked) {
-                            Snackbar(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .navigationBarsPadding()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                                action = {
-                                    TextButton(
-                                        onClick = { updateController.completeUpdate() },
-                                        colors = ButtonDefaults.textButtonColors(
-                                            contentColor = MaterialTheme.colorScheme.inversePrimary,
-                                        ),
-                                    ) {
-                                        Text("Restart")
-                                    }
-                                },
-                                dismissAction = {
-                                    IconButton(onClick = { updateController.dismissReadyBanner() }) {
-                                        Icon(Icons.Rounded.Close, contentDescription = "Dismiss update banner")
-                                    }
-                                },
-                            ) {
-                                Text("Update downloaded — restart to install")
+                            if (approvalToast != null) {
+                                Snackbar(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .navigationBarsPadding()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                ) {
+                                    Text(approvalToast!!)
+                                }
+                            }
+                            if (updateReady) {
+                                Snackbar(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .navigationBarsPadding()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    action = {
+                                        TextButton(
+                                            onClick = { updateController.completeUpdate() },
+                                            colors = ButtonDefaults.textButtonColors(
+                                                contentColor = MaterialTheme.colorScheme.inversePrimary,
+                                            ),
+                                        ) {
+                                            Text("Restart")
+                                        }
+                                    },
+                                    dismissAction = {
+                                        IconButton(onClick = { updateController.dismissReadyBanner() }) {
+                                            Icon(Icons.Rounded.Close, contentDescription = "Dismiss update banner")
+                                        }
+                                    },
+                                ) {
+                                    Text("Update downloaded — restart to install")
+                                }
                             }
                         }
                     }
@@ -276,7 +304,7 @@ class MainActivity : FragmentActivity() {
             }
         } catch (t: Throwable) {
             val trace = CrashStore.record(this, Thread.currentThread().name, t)
-            CrashStore.showInlineCrashView(this, trace, serverUrl) { recreate() }
+            CrashStore.showInlineCrashView(this, trace, serverUrl = null) { recreate() }
         }
     }
 
@@ -300,16 +328,22 @@ class MainActivity : FragmentActivity() {
             }
         }
         playUpdateController?.onStart()
+        checkedUpdateInOnStart = true
     }
 
     override fun onResume() {
         super.onResume()
         resumeTick.value += 1
-        playUpdateController?.onResume()
+        if (checkedUpdateInOnStart) {
+            checkedUpdateInOnStart = false
+        } else {
+            playUpdateController?.onResume()
+        }
     }
 
     override fun onStop() {
         backgroundedAtMs = SystemClock.elapsedRealtime()
+        checkedUpdateInOnStart = false
         playUpdateController?.onStop()
         super.onStop()
     }
@@ -323,17 +357,28 @@ class MainActivity : FragmentActivity() {
 
     private fun handleSsoCallbackIntent(app: DoorkingApp, intent: Intent?) {
         if (app.startupCrash != null || intent == null) return
+        if ((intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return
+
         val approvalReqId = intent.getStringExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
         if (!approvalReqId.isNullOrBlank()) {
             intent.removeExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
-            app.container.passkeyApprovalRequests.tryEmit(approvalReqId)
+            if (APPROVAL_REQUEST_ID_RE.matches(approvalReqId)) {
+                app.container.passkeyApprovalRequests.tryEmit(approvalReqId)
+            }
         }
         val uri = intent.data ?: return
         if (uri.scheme == "doorking" && uri.host == "sso" && uri.path == "/callback") {
+            intent.data = null
             app.container.ssoCallbacks.tryEmit(uri)
         } else if (uri.scheme == "doorking" && uri.host == "invite") {
+            intent.data = null
             app.container.inviteLinks.tryEmit(uri)
         }
+    }
+
+    private companion object {
+        const val APPROVAL_FETCH_MIN_INTERVAL_MS = 15_000L
+        val APPROVAL_REQUEST_ID_RE = Regex("^[A-Za-z0-9_-]{8,128}$")
     }
 }
 
@@ -352,44 +397,51 @@ private fun PasskeyApprovalDialog(
     fun onPickNumber(pickedNumber: Int) {
         if (busy) return
         val keyId = biometricKeyId?.takeIf { it.isNotBlank() }
-        val cryptoSig = BiometricKeyManager.initSigningCrypto()
-        if (keyId == null || cryptoSig == null) {
+        if (keyId == null) {
             error = "Hardware fingerprint signing key is unavailable on this device."
             return
         }
         busy = true
         error = null
-        BiometricUnlockManager.authenticateWithCrypto(
-            activity = activity,
-            signature = cryptoSig,
-            title = "Approve new passkey?",
-            subtitle = "Confirm $pickedNumber for ${request.deviceLabel.ifBlank { "other device" }}",
-            onSuccess = { unlockedSig ->
-                scope.launch {
-                    runCatching {
-                        val sigB64 = BiometricKeyManager.signChallenge(unlockedSig, request.challenge)
-                        onRespond(
-                            RespondPasskeyApprovalRequest(
-                                decision = "approve",
-                                pickedNumber = pickedNumber,
-                                biometricKeyId = keyId,
-                                signature = sigB64,
-                            ),
-                        )
-                    }.onFailure { err ->
-                        error = err.message ?: "Approval failed"
-                        busy = false
+        scope.launch {
+            val cryptoSig = BiometricKeyManager.initSigningCrypto()
+            if (cryptoSig == null) {
+                error = "Hardware fingerprint signing key is unavailable on this device."
+                busy = false
+                return@launch
+            }
+            BiometricUnlockManager.authenticateWithCrypto(
+                activity = activity,
+                signature = cryptoSig,
+                title = "Approve new passkey?",
+                subtitle = "Confirm $pickedNumber for ${request.deviceLabel.ifBlank { "other device" }}",
+                onSuccess = { unlockedSig ->
+                    scope.launch {
+                        runCatching {
+                            val sigB64 = BiometricKeyManager.signChallenge(unlockedSig, request.challenge)
+                            onRespond(
+                                RespondPasskeyApprovalRequest(
+                                    decision = "approve",
+                                    pickedNumber = pickedNumber,
+                                    biometricKeyId = keyId,
+                                    signature = sigB64,
+                                ),
+                            )
+                        }.onFailure { err ->
+                            error = err.message ?: "Approval failed"
+                            busy = false
+                        }
                     }
-                }
-            },
-            onError = { msg ->
-                error = msg
-                busy = false
-            },
-            onCancelled = {
-                busy = false
-            },
-        )
+                },
+                onError = { msg ->
+                    error = msg
+                    busy = false
+                },
+                onCancelled = {
+                    busy = false
+                },
+            )
+        }
     }
 
     fun onDeny() {
@@ -493,12 +545,13 @@ private fun BiometricLockOverlay(
 ) {
     var error by remember { mutableStateOf<String?>(null) }
     var promptTrigger by remember { mutableIntStateOf(0) }
+    val currentOnUnlocked by rememberUpdatedState(onUnlocked)
 
     LaunchedEffect(promptTrigger) {
         error = null
         BiometricUnlockManager.authenticate(
             activity = activity,
-            onSuccess = onUnlocked,
+            onSuccess = { currentOnUnlocked() },
             onError = { msg -> error = msg },
             onCancelled = { /* User can tap Unlock button */ },
         )

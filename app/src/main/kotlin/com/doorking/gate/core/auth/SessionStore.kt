@@ -2,7 +2,9 @@ package com.doorking.gate.core.auth
 
 import android.content.Context
 import com.doorking.gate.BuildConfig
+import com.doorking.gate.core.media.PdfShareHelper
 import com.doorking.gate.tile.GateRelayTileManager
+import com.doorking.gate.widget.RelaySingleWidget
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 const val DEFAULT_SERVER_URL = BuildConfig.DEFAULT_SERVER_URL
 
@@ -31,6 +34,8 @@ data class StoredAuthState(
     val biometricLockEnabled: Boolean = false,
     val biometricKeyId: String? = null,
     val loaded: Boolean = false,
+    val tokenServerOrigin: String? = null,
+    val crashlyticsEnabled: Boolean = false,
 )
 
 /**
@@ -49,12 +54,19 @@ interface SessionStorage {
     suspend fun setThemeMode(mode: ThemeMode)
     suspend fun setBiometricLockEnabled(enabled: Boolean)
     suspend fun setBiometricKeyId(keyId: String?)
+    suspend fun setCrashlyticsEnabled(enabled: Boolean) {}
 }
 
 fun normalizeServerUrl(raw: String): String {
     val trimmed = raw.trim().trimEnd('/')
     if (trimmed.isEmpty()) return DEFAULT_SERVER_URL
     return if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) trimmed else "https://$trimmed"
+}
+
+/** Returns canonical `scheme://host:port` origin for a server URL, or `null` if unparseable. */
+fun serverOriginOf(rawUrl: String): String? {
+    val parsed = normalizeServerUrl(rawUrl).toHttpUrlOrNull() ?: return null
+    return "${parsed.scheme}://${parsed.host}:${parsed.port}"
 }
 
 private val Context.authDataStore: DataStore<Preferences> by preferencesDataStore(name = "doorking_auth")
@@ -87,6 +99,8 @@ class EncryptedSessionStore(
                     biometricLockEnabled = prefs[KEY_BIOMETRIC_LOCK] == true,
                     biometricKeyId = prefs[KEY_BIOMETRIC_KEY_ID],
                     loaded = true,
+                    tokenServerOrigin = prefs[KEY_TOKEN_SERVER_ORIGIN],
+                    crashlyticsEnabled = prefs[KEY_CRASHLYTICS_ENABLED] == true,
                 )
             }
         }
@@ -100,26 +114,40 @@ class EncryptedSessionStore(
 
     override suspend fun saveSessionToken(token: String) {
         val encrypted = withContext(Dispatchers.IO) { cipher.encrypt(token) }
-        dataStore.edit { it[KEY_SESSION_TOKEN] = encrypted }
-        _state.value = _state.value.copy(sessionToken = token, loaded = true)
+        val origin = serverOriginOf(_state.value.serverUrl)
+        dataStore.edit {
+            it[KEY_SESSION_TOKEN] = encrypted
+            if (origin != null) it[KEY_TOKEN_SERVER_ORIGIN] = origin else it.remove(KEY_TOKEN_SERVER_ORIGIN)
+        }
+        _state.value = _state.value.copy(
+            sessionToken = token,
+            tokenServerOrigin = origin,
+            loaded = true,
+        )
     }
 
     override suspend fun clearSessionToken() {
         dataStore.edit {
             it.remove(KEY_SESSION_TOKEN)
+            it.remove(KEY_TOKEN_SERVER_ORIGIN)
             it.remove(KEY_LAST_GATE)
             it.remove(KEY_BIOMETRIC_LOCK)
             it.remove(KEY_BIOMETRIC_KEY_ID)
         }
-        BiometricKeyManager.deleteLocalKey()
-        GateRelayTileManager.clearAll(appContext)
         _state.value = _state.value.copy(
             sessionToken = null,
+            tokenServerOrigin = null,
             lastGatePhone = null,
             biometricLockEnabled = false,
             biometricKeyId = null,
             loaded = true,
         )
+        withContext(Dispatchers.IO) {
+            runCatching { BiometricKeyManager.deleteLocalKey() }
+            runCatching { GateRelayTileManager.clearAll(appContext) }
+            runCatching { RelaySingleWidget.clearAll(appContext) }
+            runCatching { PdfShareHelper.clearExports(appContext) }
+        }
     }
 
     override suspend fun setServerUrl(url: String) {
@@ -152,12 +180,19 @@ class EncryptedSessionStore(
         _state.value = _state.value.copy(biometricKeyId = keyId?.ifBlank { null })
     }
 
+    override suspend fun setCrashlyticsEnabled(enabled: Boolean) {
+        dataStore.edit { it[KEY_CRASHLYTICS_ENABLED] = enabled }
+        _state.value = _state.value.copy(crashlyticsEnabled = enabled)
+    }
+
     private companion object {
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_TOKEN = stringPreferencesKey("session_token_enc")
+        val KEY_TOKEN_SERVER_ORIGIN = stringPreferencesKey("token_server_origin")
         val KEY_LAST_GATE = stringPreferencesKey("last_gate_phone")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         val KEY_BIOMETRIC_LOCK = booleanPreferencesKey("biometric_lock_enabled")
         val KEY_BIOMETRIC_KEY_ID = stringPreferencesKey("biometric_key_id")
+        val KEY_CRASHLYTICS_ENABLED = booleanPreferencesKey("crashlytics_enabled")
     }
 }

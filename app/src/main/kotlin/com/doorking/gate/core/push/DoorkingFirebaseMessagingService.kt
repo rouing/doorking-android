@@ -14,6 +14,7 @@ import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -45,7 +46,7 @@ class DoorkingFirebaseMessagingService : FirebaseMessagingService() {
 
         if (message.data["type"] == "passkey_approval") {
             val requestId = message.data["requestId"].orEmpty()
-            if (requestId.isBlank()) return
+            if (!PASSKEY_APPROVAL_ID_RE.matches(requestId)) return
             val deviceLabel = message.data["deviceLabel"].orEmpty().ifBlank { "Another device" }
             val app = application as? DoorkingApp
             if (app != null && app.startupCrash == null) {
@@ -114,7 +115,13 @@ class DoorkingFirebaseMessagingService : FirebaseMessagingService() {
         NotificationManagerCompat.from(this).notify(tag, tag.hashCode(), notification)
     }
 
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+
     companion object {
         const val EXTRA_PASSKEY_APPROVAL_REQUEST_ID = "passkey_approval_request_id"
+        private val PASSKEY_APPROVAL_ID_RE = Regex("^[A-Za-z0-9_-]{8,128}$")
     }
 }

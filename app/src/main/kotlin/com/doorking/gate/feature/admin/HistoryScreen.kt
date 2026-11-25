@@ -26,6 +26,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.doorking.gate.core.ui.components.CollapsibleSectionCard
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +49,9 @@ import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private val ACTION_LABELS = mapOf(
@@ -87,18 +91,31 @@ fun HistoryScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun load(initial: Boolean = false) {
+    suspend fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         error = null
-        scope.launch {
-            runCatching {
-                val h = api.getHistory(gatePhone)
-                val p = runCatching { api.getPullArchive(gatePhone).pulls }.getOrDefault(emptyList())
-                h to p
+        runCatching {
+            coroutineScope {
+                val hDef = async { api.getHistory(gatePhone) }
+                val pDef = async {
+                    try {
+                        api.getPullArchive(gatePhone).pulls
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                }
+                hDef.await() to pDef.await()
             }
-                .onSuccess { (h, p) -> history = h; pulls = p; loading = false; refreshing = false }
-                .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
         }
+            .onSuccess { (h, p) -> history = h; pulls = p; loading = false; refreshing = false }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     LaunchedEffect(gatePhone) { load(initial = true) }
@@ -208,7 +225,7 @@ fun HistoryScreen(
 
     PullToRefreshBox(
         isRefreshing = refreshing,
-        onRefresh = { load(initial = false) },
+        onRefresh = { scope.launch { load(initial = false) } },
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -216,10 +233,14 @@ fun HistoryScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
+            if (error != null) {
+                item(key = "err", contentType = "error") {
+                    ErrorBanner(error!!, onRetry = { scope.launch { load(initial = false) } })
+                }
+            }
 
             // Accessible collapsible Gate users (borderless tonal)
-            item(key = "users") {
+            item(key = "users", contentType = "users_section") {
                 CollapsibleSectionCard(
                     title = "Gate users (${users.size})",
                     expanded = usersExpanded,
@@ -255,7 +276,7 @@ fun HistoryScreen(
             }
 
             if (pulls.isNotEmpty()) {
-                item(key = "pulls") {
+                item(key = "pulls", contentType = "pulls_section") {
                     CollapsibleSectionCard(
                         title = "Past pulls (${pulls.size})",
                         expanded = pullsExpanded,
@@ -298,7 +319,7 @@ fun HistoryScreen(
             }
 
             if (visibleEvents.isEmpty()) {
-                item(key = "events-empty") {
+                item(key = "events-empty", contentType = "empty") {
                     BubbleCard {
                         Text("No history events yet", style = MaterialTheme.typography.titleMedium)
                         Text(
@@ -311,17 +332,20 @@ fun HistoryScreen(
             }
 
             // Events bubble cards with right-aligned Revert button
-            items(visibleEvents, key = { it.id }) { entry ->
-            val failed = entry.result == "failed"
-            val expanded = expandedEventId == entry.id && entry.details.isNotEmpty()
-            BubbleCard(
-                containerColor = if (failed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surfaceContainerLow,
-                onClick = if (entry.details.isNotEmpty()) {
-                    { expandedEventId = if (expanded) null else entry.id }
-                } else {
-                    null
-                },
-            ) {
+            items(visibleEvents, key = { it.id }, contentType = { "history_event" }) { entry ->
+                val failed = entry.result == "failed"
+                val hasDetails = entry.details.isNotEmpty()
+                val expanded by remember(entry.id, hasDetails) {
+                    derivedStateOf { hasDetails && expandedEventId == entry.id }
+                }
+                BubbleCard(
+                    containerColor = if (failed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                    onClick = if (hasDetails) {
+                        { expandedEventId = if (expanded) null else entry.id }
+                    } else {
+                        null
+                    },
+                ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -380,7 +404,7 @@ fun HistoryScreen(
         }
 
         if (events.size > shown) {
-            item(key = "more") {
+            item(key = "more", contentType = "show_more") {
                 OutlinedButton(
                     onClick = { shown += 20 },
                     modifier = Modifier.fillMaxWidth(),

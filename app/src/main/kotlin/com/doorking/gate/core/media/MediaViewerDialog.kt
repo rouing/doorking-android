@@ -2,6 +2,7 @@ package com.doorking.gate.core.media
 
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,8 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.FilterChip
@@ -21,8 +21,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -103,8 +107,13 @@ fun MediaViewerDialog(
                 }
 
                 if (items.size > 1) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        itemsIndexed(items) { idx, entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items.forEachIndexed { idx, entry ->
                             FilterChip(
                                 selected = idx == selectedIndex,
                                 onClick = { selectedIndex = idx },
@@ -149,20 +158,38 @@ private fun AuthenticatedVideoPlayer(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val player = remember(url) {
+    val player = remember(context, okHttpClient) {
         val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
-            .apply {
-                setMediaItem(MediaItem.fromUri(url))
-                playWhenReady = true
-                prepare()
-            }
+    }
+    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+    var resumeOnStart by remember { mutableStateOf(false) }
+
+    LaunchedEffect(player, url) {
+        player.setMediaItem(MediaItem.fromUri(url))
+        player.playWhenReady = true
+        player.prepare()
+    }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        resumeOnStart = player.playWhenReady
+        player.pause()
+    }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        if (resumeOnStart) {
+            player.play()
+        }
     }
 
     DisposableEffect(player) {
-        onDispose { player.release() }
+        onDispose {
+            playerViewRef?.player = null
+            playerViewRef = null
+            player.release()
+        }
     }
 
     AndroidView(
@@ -170,9 +197,15 @@ private fun AuthenticatedVideoPlayer(
             PlayerView(ctx).apply {
                 this.player = player
                 useController = true
+                playerViewRef = this
             }
         },
-        update = { view -> view.player = player },
+        update = { view ->
+            playerViewRef = view
+            if (view.player !== player) {
+                view.player = player
+            }
+        },
         modifier = modifier,
     )
 }

@@ -15,8 +15,11 @@ import com.doorking.gate.core.network.PortalReportRequest
 import com.doorking.gate.core.network.PortalStatusReply
 import com.doorking.gate.core.network.ResidentRequestDto
 import com.doorking.gate.core.network.TransactionRowDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -47,16 +50,42 @@ class ResidentPortalViewModel(
     private val gatePhone: String,
     private val api: DoorkingApi,
     private val pollIntervalMs: Long = 3_000L,
+    private val cooldownTickMs: Long = 1_000L,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ResidentPortalUiState())
     val uiState: StateFlow<ResidentPortalUiState> = _uiState.asStateFlow()
 
     private var statusPollJob: Job? = null
+    private var cooldownTickJob: Job? = null
+    private var statusPollingEnabled: Boolean = false
+    private var hasLoadedOnce: Boolean = false
 
     init {
         loadAll(initial = true)
-        startStatusPolling()
+    }
+
+    fun setStatusPollingEnabled(enabled: Boolean) {
+        val wasEnabled = statusPollingEnabled
+        statusPollingEnabled = enabled
+        if (!enabled) {
+            statusPollJob?.cancel()
+            statusPollJob = null
+            cooldownTickJob?.cancel()
+            cooldownTickJob = null
+            return
+        }
+        if (!wasEnabled) {
+            if (hasLoadedOnce) {
+                startStatusPolling(immediateRefresh = true)
+            }
+        } else {
+            val current = _uiState.value.status
+            syncCooldownTicker(current)
+            if (needsStatusPolling(current) && statusPollJob?.isActive != true) {
+                startStatusPolling(immediateRefresh = false)
+            }
+        }
     }
 
     fun selectUnit(directoryCode: String) {
@@ -72,16 +101,25 @@ class ResidentPortalViewModel(
                 refreshing = !initial,
                 error = null,
             )
-            runCatching {
+            runCatchingNonFatal {
                 val me = api.getPortalMe(gatePhone, codeOverride)
                 val activeCode = codeOverride ?: me.unit.directoryCode
-                val status = runCatching { api.getPortalStatus(gatePhone) }.getOrDefault(PortalStatusReply())
-                val act = runCatching { api.getPortalActivity(gatePhone, activeCode) }.getOrNull()
-                val reqs = runCatching { api.getPortalRequests(gatePhone).requests }.getOrDefault(emptyList())
-                Triple(me, status, Pair(act, reqs))
+                coroutineScope {
+                    val statusDeferred = async {
+                        runCatchingNonFatal { api.getPortalStatus(gatePhone) }.getOrDefault(PortalStatusReply())
+                    }
+                    val actDeferred = async {
+                        runCatchingNonFatal { api.getPortalActivity(gatePhone, activeCode) }.getOrNull()
+                    }
+                    val reqsDeferred = async {
+                        runCatchingNonFatal { api.getPortalRequests(gatePhone).requests }.getOrDefault(emptyList())
+                    }
+                    Triple(me, statusDeferred.await(), Pair(actDeferred.await(), reqsDeferred.await()))
+                }
             }
                 .onSuccess { (me, status, extra) ->
                     val (act, reqs) = extra
+                    hasLoadedOnce = true
                     _uiState.value = _uiState.value.copy(
                         loading = false,
                         refreshing = false,
@@ -93,6 +131,10 @@ class ResidentPortalViewModel(
                         requests = reqs,
                         error = null,
                     )
+                    syncCooldownTicker(status)
+                    if (statusPollingEnabled && needsStatusPolling(status) && statusPollJob?.isActive != true) {
+                        startStatusPolling(immediateRefresh = false)
+                    }
                 }
                 .onFailure { err ->
                     _uiState.value = _uiState.value.copy(
@@ -251,19 +293,80 @@ class ResidentPortalViewModel(
         _uiState.value = _uiState.value.copy(bannerMessage = null, error = null)
     }
 
-    private fun startStatusPolling() {
+    private fun needsStatusPolling(status: PortalStatusReply): Boolean =
+        !status.available || status.cooldownSeconds > 0
+
+    private fun syncCooldownTicker(status: PortalStatusReply) {
+        if (!statusPollingEnabled || !status.available || status.cooldownSeconds <= 0) {
+            cooldownTickJob?.cancel()
+            cooldownTickJob = null
+            return
+        }
+        if (cooldownTickJob?.isActive == true) return
+        cooldownTickJob = viewModelScope.launch {
+            while (isActive && statusPollingEnabled) {
+                delay(cooldownTickMs)
+                val current = _uiState.value.status
+                if (!current.available || current.cooldownSeconds <= 0) break
+                val next = (current.cooldownSeconds - 1).coerceAtLeast(0)
+                _uiState.value = _uiState.value.copy(status = current.copy(cooldownSeconds = next))
+                if (next == 0) break
+            }
+        }
+    }
+
+    private fun startStatusPolling(immediateRefresh: Boolean = false) {
+        if (!statusPollingEnabled) return
         statusPollJob?.cancel()
         statusPollJob = viewModelScope.launch {
-            while (isActive) {
-                delay(pollIntervalMs)
-                refreshStatusOnce()
+            var consecutiveErrors = 0
+            var delayBeforeNext = if (immediateRefresh) 0L else pollIntervalMs
+            while (isActive && statusPollingEnabled) {
+                if (delayBeforeNext > 0L) {
+                    delay(delayBeforeNext)
+                    if (consecutiveErrors == 0 && !needsStatusPolling(_uiState.value.status)) break
+                }
+                if (!statusPollingEnabled) break
+                val fetched = try {
+                    api.getPortalStatus(gatePhone)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    null
+                }
+                if (fetched != null) {
+                    consecutiveErrors = 0
+                    _uiState.value = _uiState.value.copy(status = fetched)
+                    syncCooldownTicker(fetched)
+                    if (!needsStatusPolling(fetched)) break
+                    delayBeforeNext = pollIntervalMs
+                } else {
+                    consecutiveErrors += 1
+                    if (consecutiveErrors >= MAX_POLL_ERRORS) break
+                    delayBeforeNext = (pollIntervalMs * (1L shl (consecutiveErrors - 1)))
+                        .coerceAtMost(MAX_POLL_BACKOFF_MS)
+                }
             }
         }
     }
 
     private suspend fun refreshStatusOnce() {
-        runCatching { api.getPortalStatus(gatePhone) }
-            .onSuccess { status -> _uiState.value = _uiState.value.copy(status = status) }
+        runCatchingNonFatal { api.getPortalStatus(gatePhone) }
+            .onSuccess { status ->
+                _uiState.value = _uiState.value.copy(status = status)
+                syncCooldownTicker(status)
+                if (statusPollingEnabled && needsStatusPolling(status) && statusPollJob?.isActive != true) {
+                    startStatusPolling(immediateRefresh = false)
+                }
+            }
+    }
+
+    private inline fun <T> runCatchingNonFatal(block: () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (t: Throwable) {
+        Result.failure(t)
     }
 
     private fun parseError(raw: String?, code: Int, fallback: String): String {
@@ -275,6 +378,9 @@ class ResidentPortalViewModel(
     }
 
     companion object {
+        private const val MAX_POLL_ERRORS = 5
+        private const val MAX_POLL_BACKOFF_MS = 30_000L
+
         fun factory(container: AppContainer, gatePhone: String): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")

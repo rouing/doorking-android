@@ -35,6 +35,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.doorking.gate.core.ui.components.CollapsibleSectionCard
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,10 +75,22 @@ import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+
+private suspend inline fun <T> safeSystemCall(block: () -> T): T? =
+    try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -133,7 +146,12 @@ fun SystemSettingsScreen(
     var keyScopePreset by remember { mutableStateOf("full") }
     var whName by remember { mutableStateOf("") }
     var whUrl by remember { mutableStateOf("") }
-    val devices = remember { mutableStateListOf<DeviceRangeDto>() }
+    val deviceStates = remember { List(10) { mutableStateOf(DeviceRangeDto()) } }
+    var hasLoadedOnce by remember(gatePhone) { mutableStateOf(false) }
+
+    val pendingRequests = remember(requests) { requests.filter { it.status == "pending" } }
+    val openReports = remember(reports) { reports.filter { it.status == "open" } }
+    val gateRelays = remember(prefs.tracker) { openableRelayIndices(prefs.tracker) }
 
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -146,33 +164,47 @@ fun SystemSettingsScreen(
         return "$fallback (HTTP $code)"
     }
 
-    fun load(initial: Boolean = false) {
+    suspend fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         error = null
-        scope.launch {
-            runCatching {
-                val p = api.getPrefs(gatePhone)
-                prefs = p
-                devices.clear()
-                repeat(10) { i -> devices.add(p.deviceAssociation.getOrElse(i) { DeviceRangeDto() }) }
-                if (isAdmin) {
-                    login = runCatching { api.getGateLogin(gatePhone) }.getOrNull()
-                    dksUser = login?.dksUser.orEmpty()
-                    users = runCatching { api.getGateUsers(gatePhone).users }.getOrDefault(emptyList())
-                    apiKeys = runCatching { api.getApiKeys(gatePhone).apiKeys }.getOrDefault(emptyList())
-                    webhooks = runCatching { api.getWebhooks(gatePhone).webhooks }.getOrDefault(emptyList())
-                    audit = runCatching { api.getLoginAudit(gatePhone).entries }.getOrDefault(emptyList())
-                    reports = runCatching { api.getSuspiciousReports(gatePhone).reports }.getOrDefault(emptyList())
-                    requests = runCatching { api.getAdminResidentRequests(gatePhone).requests }.getOrDefault(emptyList())
-                    val cams = runCatching { api.getCameras(gatePhone).settings }.getOrNull()
+        runCatching {
+            val p = api.getPrefs(gatePhone)
+            prefs = p
+            repeat(10) { i -> deviceStates[i].value = p.deviceAssociation.getOrElse(i) { DeviceRangeDto() } }
+            if (isAdmin) {
+                coroutineScope {
+                    val loginDef = async { safeSystemCall { api.getGateLogin(gatePhone) } }
+                    val usersDef = async { safeSystemCall { api.getGateUsers(gatePhone).users } ?: emptyList() }
+                    val keysDef = async { safeSystemCall { api.getApiKeys(gatePhone).apiKeys } ?: emptyList() }
+                    val webhooksDef = async { safeSystemCall { api.getWebhooks(gatePhone).webhooks } ?: emptyList() }
+                    val auditDef = async { safeSystemCall { api.getLoginAudit(gatePhone).entries } ?: emptyList() }
+                    val reportsDef = async { safeSystemCall { api.getSuspiciousReports(gatePhone).reports } ?: emptyList() }
+                    val requestsDef = async { safeSystemCall { api.getAdminResidentRequests(gatePhone).requests } ?: emptyList() }
+                    val camsDef = async { safeSystemCall { api.getCameras(gatePhone).settings } }
+
+                    val loadedLogin = loginDef.await()
+                    login = loadedLogin
+                    dksUser = loadedLogin?.dksUser.orEmpty()
+                    users = usersDef.await()
+                    apiKeys = keysDef.await()
+                    webhooks = webhooksDef.await()
+                    audit = auditDef.await()
+                    reports = reportsDef.await()
+                    requests = requestsDef.await()
+                    val cams = camsDef.await()
                     cameras = cams
                     cameraChannels.clear()
                     if (cams != null) cameraChannels.addAll(cams.channels)
                 }
             }
-                .onSuccess { loading = false; refreshing = false }
-                .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
         }
+            .onSuccess { hasLoadedOnce = true; loading = false; refreshing = false }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     LaunchedEffect(gatePhone) { load(initial = true) }
@@ -283,14 +315,14 @@ fun SystemSettingsScreen(
         )
     }
 
-    if (loading && login == null && devices.isEmpty()) {
+    if (loading && !hasLoadedOnce) {
         FullScreenLoading("Loading system settings…")
         return
     }
 
     PullToRefreshBox(
         isRefreshing = refreshing,
-        onRefresh = { load(initial = false) },
+        onRefresh = { scope.launch { load(initial = false) } },
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -298,11 +330,15 @@ fun SystemSettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
+            if (error != null) {
+                item(key = "err", contentType = "error") {
+                    ErrorBanner(error!!, onRetry = { scope.launch { load(initial = false) } })
+                }
+            }
 
         if (isAdmin) {
             // 1. Gate Login
-            item(key = "login") {
+            item(key = "login", contentType = "section_login") {
                 CollapsibleSection(
                     title = "Gate Login (DKS Cloud)",
                     expanded = openLogin,
@@ -350,7 +386,7 @@ fun SystemSettingsScreen(
             }
 
             // 2. Gate Users & Share
-            item(key = "users") {
+            item(key = "users", contentType = "section_users") {
                 CollapsibleSection("Gate Users (${users.size})", openUsers, { openUsers = !openUsers }) {
                     users.forEach { u ->
                         val roleTone = when (u.role) {
@@ -413,8 +449,8 @@ fun SystemSettingsScreen(
             }
 
             // 3. Security, Portal & Review Queues
-            item(key = "portal") {
-                val pendingCount = requests.count { it.status == "pending" } + reports.count { it.status == "open" }
+            item(key = "portal", contentType = "section_portal") {
+                val pendingCount = pendingRequests.size + openReports.size
                 CollapsibleSection(
                     title = "Security & Resident Portal" + if (pendingCount > 0) " ($pendingCount)" else "",
                     expanded = openPortal,
@@ -443,7 +479,6 @@ fun SystemSettingsScreen(
                     val portalEnabled = portalCfg?.enabled == true
                     val buzzEnabled = portalCfg?.buzzEnabled == true
                     val activeBuzzRelays = (portalCfg?.buzzRelays ?: listOf(0)).ifEmpty { listOf(0) }
-                    val gateRelays = openableRelayIndices(prefs.tracker)
 
                     fun savePortalPatch(
                         nextEnabled: Boolean = portalEnabled,
@@ -520,7 +555,7 @@ fun SystemSettingsScreen(
                             }
                         }
                     }
-                    requests.filter { it.status == "pending" }.forEach { req ->
+                    pendingRequests.forEach { req ->
                         BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Text("Unit ${req.directoryCode} · ${req.kind}", style = MaterialTheme.typography.titleSmall)
                             if (req.note.isNotBlank()) Text(req.note, style = MaterialTheme.typography.bodySmall)
@@ -548,7 +583,7 @@ fun SystemSettingsScreen(
                             }
                         }
                     }
-                    reports.filter { it.status == "open" }.forEach { rep ->
+                    openReports.forEach { rep ->
                         BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Text("Suspicious · Unit ${rep.directoryCode}", style = MaterialTheme.typography.titleSmall)
                             Text(rep.txSummary, style = MaterialTheme.typography.bodySmall)
@@ -569,7 +604,7 @@ fun SystemSettingsScreen(
             }
 
             // 4. Login Audit Log
-            item(key = "audit") {
+            item(key = "audit", contentType = "section_audit") {
                 CollapsibleSection("Login Audit Log (${audit.size})", openAudit, { openAudit = !openAudit }) {
                     audit.take(25).forEach { e ->
                         val tone = when (e.outcome) {
@@ -593,7 +628,7 @@ fun SystemSettingsScreen(
             }
 
             // 5. API Keys (compact bubble cards + full-width Name input row)
-            item(key = "keys") {
+            item(key = "keys", contentType = "section_keys") {
                 CollapsibleSection(
                     title = "API Keys (${apiKeys.size})",
                     expanded = openKeys,
@@ -706,7 +741,7 @@ fun SystemSettingsScreen(
             }
 
             // 6. Webhooks
-            item(key = "webhooks") {
+            item(key = "webhooks", contentType = "section_webhooks") {
                 CollapsibleSection("Webhooks (${webhooks.size})", openWebhooks, { openWebhooks = !openWebhooks }) {
                     webhooks.forEach { w ->
                         BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
@@ -762,8 +797,7 @@ fun SystemSettingsScreen(
             // 6b. Camera Channels ↔ Relay Mapping
             val camCfg = cameras
             if (camCfg != null && cameraChannels.isNotEmpty()) {
-                item(key = "camera_channels") {
-                    val gateRelays = openableRelayIndices(prefs.tracker)
+                item(key = "camera_channels", contentType = "section_cameras") {
                     CollapsibleSection(
                         title = "Camera Channels (${cameraChannels.size})",
                         expanded = openCameras,
@@ -854,58 +888,26 @@ fun SystemSettingsScreen(
         }
 
         // 7. Device Association (responsive 2-line rows so 5-digit codes & names never clip at large font scales)
-        item(key = "devices") {
+        item(key = "devices", contentType = "section_devices") {
             CollapsibleSection(
                 title = "Device Association",
                 expanded = openDevices,
                 onToggle = { openDevices = !openDevices },
                 helpText = "Friendly names for ranges of card or clicker numbers (for example 00001–00500 = Residents). Shown as the Event Type on the Activity feed.",
             ) {
-                devices.forEachIndexed { i, row ->
-                    BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            StatusPill("#${i + 1}", tone = if (row.name.isNotBlank()) PillTone.Primary else PillTone.Neutral)
-                            OutlinedTextField(
-                                value = row.name,
-                                onValueChange = { devices[i] = row.copy(name = it.take(12)) },
-                                label = { Text("Device name") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            OutlinedTextField(
-                                value = row.from,
-                                onValueChange = { devices[i] = row.copy(from = it.filter(Char::isDigit).take(5)) },
-                                label = { Text("From") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f),
-                            )
-                            OutlinedTextField(
-                                value = row.to,
-                                onValueChange = { devices[i] = row.copy(to = it.filter(Char::isDigit).take(5)) },
-                                label = { Text("To") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
+                repeat(deviceStates.size) { i ->
+                    DeviceAssociationRow(
+                        index = i,
+                        state = deviceStates[i],
+                    )
                 }
                 Button(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
                         scope.launch {
                             val arr = JsonArray(
-                                devices.map { d ->
+                                deviceStates.map { state ->
+                                    val d = state.value
                                     buildJsonObject {
                                         put("name", JsonPrimitive(d.name.trim()))
                                         put("from", JsonPrimitive(d.from.trim()))
@@ -928,7 +930,7 @@ fun SystemSettingsScreen(
 
         // 8. Danger Zone
         if (isAdmin) {
-            item(key = "danger") {
+            item(key = "danger", contentType = "section_danger") {
                 CollapsibleSection(
                     title = "Danger Zone",
                     expanded = openDanger,
@@ -952,6 +954,51 @@ fun SystemSettingsScreen(
             }
         }
     }
+    }
+}
+
+@Composable
+private fun DeviceAssociationRow(
+    index: Int,
+    state: MutableState<DeviceRangeDto>,
+) {
+    val row = state.value
+    BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusPill("#${index + 1}", tone = if (row.name.isNotBlank()) PillTone.Primary else PillTone.Neutral)
+            OutlinedTextField(
+                value = row.name,
+                onValueChange = { state.value = row.copy(name = it.take(12)) },
+                label = { Text("Device name") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = row.from,
+                onValueChange = { state.value = row.copy(from = it.filter(Char::isDigit).take(5)) },
+                label = { Text("From") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedTextField(
+                value = row.to,
+                onValueChange = { state.value = row.copy(to = it.filter(Char::isDigit).take(5)) },
+                label = { Text("To") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 

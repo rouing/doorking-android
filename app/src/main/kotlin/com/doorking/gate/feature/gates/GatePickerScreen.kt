@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
@@ -82,9 +83,17 @@ fun GatePickerScreen(
     onGateOpened: (GateInfoDto) -> Unit,
     onSignOut: () -> Unit,
 ) {
-    val vm: GatePickerViewModel = viewModel(factory = GatePickerViewModel.factory(container))
+    val factory = remember(container) { GatePickerViewModel.factory(container) }
+    val vm: GatePickerViewModel = viewModel(factory = factory)
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showAddSheet by remember { mutableStateOf(false) }
+
+    LifecycleStartEffect(vm) {
+        vm.setActive(true)
+        onStopOrDispose {
+            vm.setActive(false)
+        }
+    }
 
     val canAddGate = session?.isResidentOnly != true
 
@@ -182,13 +191,13 @@ fun GatePickerScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (state.error != null) {
-                    item(key = "error") { ErrorBanner(state.error!!, onRetry = { vm.loadGates(initial = false) }) }
+                    item(key = "error", contentType = "error") { ErrorBanner(state.error!!, onRetry = { vm.loadGates(initial = false) }) }
                 }
                 if (state.addError != null) {
-                    item(key = "addError") { ErrorBanner(state.addError!!) }
+                    item(key = "addError", contentType = "error") { ErrorBanner(state.addError!!) }
                 }
                 if (state.addJob != null) {
-                    item(key = "addJob") {
+                    item(key = "addJob", contentType = "add_job") {
                         AddGateProgressCard(
                             job = state.addJob!!,
                             onDismiss = vm::dismissAddJob,
@@ -196,7 +205,7 @@ fun GatePickerScreen(
                     }
                 }
                 if (state.gates.isEmpty() && state.error == null) {
-                    item(key = "empty") {
+                    item(key = "empty", contentType = "empty") {
                         BubbleCard {
                             Text("No gates yet", style = MaterialTheme.typography.titleMedium)
                             Text(
@@ -211,7 +220,7 @@ fun GatePickerScreen(
                         }
                     }
                 } else {
-                    items(items = state.gates, key = { it.phoneNumber }) { gate ->
+                    items(items = state.gates, key = { it.phoneNumber }, contentType = { "gate_row" }) { gate ->
                         GateRowCard(
                             gate = gate,
                             opening = state.openingPhone == gate.phoneNumber,

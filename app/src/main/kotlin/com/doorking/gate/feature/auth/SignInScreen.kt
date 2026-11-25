@@ -2,6 +2,7 @@ package com.doorking.gate.feature.auth
 
 import android.content.Context
 import android.net.Uri
+import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -55,6 +56,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.doorking.gate.BuildConfig
+import com.doorking.gate.core.auth.normalizeServerUrl
 import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.network.SsoProviderInfo
 import com.doorking.gate.core.ui.components.ErrorBanner
@@ -63,6 +66,36 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import kotlinx.coroutines.launch
+import java.net.URI
+
+/**
+ * Validates external URLs opened in Custom Tabs (SSO redirects and Privacy Policy).
+ * Requires `https://`, a non-blank host, and no embedded credentials (`userInfo`); permits
+ * `http://` only for loopback/emulator hosts when [allowLocalHttp] is enabled (debug builds).
+ */
+fun isValidExternalBrowserUrl(
+    rawUrl: String,
+    allowLocalHttp: Boolean = BuildConfig.DEBUG,
+): Boolean {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isBlank()) return false
+    val parsed = runCatching { URI(trimmed) }.getOrNull() ?: return false
+    val scheme = parsed.scheme?.lowercase() ?: return false
+    val host = parsed.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
+    if (!parsed.userInfo.isNullOrBlank()) return false
+    val isLocal = host == "localhost" || host == "127.0.0.1" || host == "10.0.2.2"
+    return scheme == "https" || (allowLocalHttp && scheme == "http" && isLocal)
+}
+
+private fun launchPinnedCustomTab(context: Context, url: String) {
+    val customTabsPkg = CustomTabsClient.getPackageName(context, null)
+    val tabsIntent = CustomTabsIntent.Builder().build().apply {
+        if (!customTabsPkg.isNullOrBlank()) {
+            intent.setPackage(customTabsPkg)
+        }
+    }
+    tabsIntent.launchUrl(context, Uri.parse(url))
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -306,11 +339,14 @@ fun SignInScreen(
                                 scope.launch {
                                     onStartSso(serverUrl, provider.id)
                                         .onSuccess { authUrl ->
-                                            runCatching {
-                                                CustomTabsIntent.Builder().build()
-                                                    .launchUrl(context, Uri.parse(authUrl))
-                                            }.onFailure { err ->
-                                                error = err.message ?: "Could not open browser for ${provider.name}"
+                                            if (!isValidExternalBrowserUrl(authUrl)) {
+                                                error = "Server returned an invalid sign-in URL."
+                                            } else {
+                                                runCatching {
+                                                    launchPinnedCustomTab(context, authUrl)
+                                                }.onFailure { err ->
+                                                    error = err.message ?: "Could not open browser for ${provider.name}"
+                                                }
                                             }
                                         }
                                         .onFailure { err ->
@@ -326,6 +362,21 @@ fun SignInScreen(
                         }
                     }
                 }
+            }
+
+            TextButton(
+                onClick = {
+                    val privacyUrl = "${normalizeServerUrl(serverUrl).trimEnd('/')}/privacy"
+                    if (!isValidExternalBrowserUrl(privacyUrl)) {
+                        error = "Privacy Policy requires an HTTPS server URL."
+                    } else {
+                        runCatching { launchPinnedCustomTab(context, privacyUrl) }
+                            .onFailure { err -> error = err.message ?: "Could not open Privacy Policy" }
+                    }
+                },
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            ) {
+                Text("Privacy Policy")
             }
         }
     }

@@ -5,6 +5,7 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.BuzzRequest
 import com.doorking.gate.core.network.DoorkingApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -55,6 +56,7 @@ object GateWidgetRepository {
         }
 
         val session = runCatching { api.getSession() }.getOrElse { err ->
+            if (err is CancellationException) throw err
             return GateWidgetSnapshot(
                 signedIn = true,
                 gatePhone = stored.lastGatePhone.orEmpty(),
@@ -143,19 +145,27 @@ object GateWidgetRepository {
         relay: Int,
         relayName: String,
         unitCode: String? = null,
+        noInteractiveStepUp: String? = "1",
     ): WidgetBuzzOutcome {
-        return runCatching {
-            val res = api.portalBuzz(gatePhone, BuzzRequest(relay = relay, code = unitCode))
+        return try {
+            val res = api.portalBuzz(
+                phone = gatePhone,
+                body = BuzzRequest(relay = relay, code = unitCode),
+                noInteractiveStepUp = noInteractiveStepUp,
+            )
             if (!res.isSuccessful) {
                 val raw = res.errorBody()?.string().orEmpty()
                 val msg = runCatching {
                     ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw).error
                 }.getOrNull() ?: "Failed (HTTP ${res.code()})"
-                return WidgetBuzzOutcome.Failed(msg)
+                WidgetBuzzOutcome.Failed(msg)
+            } else {
+                val alreadyOpen = res.body()?.alreadyOpen == true
+                WidgetBuzzOutcome.Opened(if (alreadyOpen) "$relayName already open" else "$relayName opened!")
             }
-            val alreadyOpen = res.body()?.alreadyOpen == true
-            WidgetBuzzOutcome.Opened(if (alreadyOpen) "$relayName already open" else "$relayName opened!")
-        }.getOrElse { err ->
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (err: Throwable) {
             WidgetBuzzOutcome.Failed(ApiClientFactory.parseErrorMessage(err))
         }
     }

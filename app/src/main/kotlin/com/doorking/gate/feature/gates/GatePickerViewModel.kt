@@ -13,6 +13,7 @@ import com.doorking.gate.core.network.GateConfigDto
 import com.doorking.gate.core.network.GateInfoDto
 import com.doorking.gate.core.network.JobDto
 import com.doorking.gate.core.network.OpenGateRequest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,10 +43,26 @@ class GatePickerViewModel(
     val uiState: StateFlow<GatePickerUiState> = _uiState.asStateFlow()
 
     private var pollJob: Job? = null
+    private var active: Boolean = true
 
     init {
         loadGates(initial = true)
         checkActiveAddJob()
+    }
+
+    fun setActive(isActive: Boolean) {
+        val wasActive = active
+        active = isActive
+        if (!isActive) {
+            pollJob?.cancel()
+            pollJob = null
+        } else if (!wasActive) {
+            if (_uiState.value.addJob?.state == "running") {
+                startPollingAddJob()
+            } else {
+                checkActiveAddJob()
+            }
+        }
     }
 
     fun loadGates(initial: Boolean = false) {
@@ -155,23 +172,49 @@ class GatePickerViewModel(
     }
 
     private fun startPollingAddJob() {
+        if (!active) return
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
-            while (isActive) {
-                val job = runCatching { api.getGateAddJob().job }.getOrNull()
-                if (job != null) {
-                    _uiState.value = _uiState.value.copy(addJob = job)
-                    if (job.state != "running") {
-                        if (job.state == "done") loadGates(initial = false)
+            var consecutiveErrors = 0
+            while (isActive && active) {
+                val reply = try {
+                    Result.success(api.getGateAddJob())
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    Result.failure(t)
+                }
+                if (reply.isSuccess) {
+                    consecutiveErrors = 0
+                    val job = reply.getOrNull()?.job
+                    if (job != null) {
+                        _uiState.value = _uiState.value.copy(addJob = job)
+                        if (job.state != "running") {
+                            if (job.state == "done") loadGates(initial = false)
+                            break
+                        }
+                    }
+                    delay(pollIntervalMs)
+                } else {
+                    consecutiveErrors += 1
+                    if (consecutiveErrors >= MAX_POLL_ERRORS) {
+                        _uiState.value = _uiState.value.copy(
+                            addError = "Lost connection while checking add-gate progress. Pull to refresh.",
+                        )
                         break
                     }
+                    val backoffMs = (pollIntervalMs * (1L shl (consecutiveErrors - 1)))
+                        .coerceAtMost(MAX_POLL_BACKOFF_MS)
+                    delay(backoffMs)
                 }
-                delay(pollIntervalMs)
             }
         }
     }
 
     companion object {
+        private const val MAX_POLL_ERRORS = 5
+        private const val MAX_POLL_BACKOFF_MS = 30_000L
+
         fun factory(container: AppContainer): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =

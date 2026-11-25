@@ -30,6 +30,9 @@ object FirebaseHelper {
     const val CHANNEL_ID = "doorking_alerts"
     private const val TAG = "FirebaseHelper"
 
+    @Volatile
+    private var crashlyticsOptedIn: Boolean = false
+
     fun isAvailable(context: Context): Boolean = runCatching {
         FirebaseApp.getApps(context.applicationContext).isNotEmpty()
     }.getOrDefault(false)
@@ -48,20 +51,37 @@ object FirebaseHelper {
         manager.createNotificationChannel(channel)
     }
 
-    fun configureCrashlytics(context: Context) {
+    fun enablePushAutoInit(context: Context) {
         if (!isAvailable(context)) return
         runCatching {
-            val crashlytics = FirebaseCrashlytics.getInstance()
-            crashlytics.isCrashlyticsCollectionEnabled = !BuildConfig.DEBUG
-            crashlytics.setCustomKey("app_version", BuildConfig.VERSION_NAME)
-            crashlytics.setCustomKey("version_code", BuildConfig.VERSION_CODE)
+            FirebaseMessaging.getInstance().isAutoInitEnabled = true
         }.onFailure { err ->
-            Log.d(TAG, "Crashlytics init skipped: ${err.message}")
+            Log.d(TAG, "FCM auto-init enable skipped: ${err.message}")
         }
     }
 
-    fun recordNonFatal(context: Context, throwable: Throwable) {
+    fun setCrashlyticsOptIn(context: Context, enabled: Boolean) {
+        val effective = enabled && !BuildConfig.DEBUG
+        crashlyticsOptedIn = effective
         if (!isAvailable(context)) return
+        runCatching {
+            val crashlytics = FirebaseCrashlytics.getInstance()
+            crashlytics.isCrashlyticsCollectionEnabled = effective
+            if (effective) {
+                crashlytics.setCustomKey("app_version", BuildConfig.VERSION_NAME)
+                crashlytics.setCustomKey("version_code", BuildConfig.VERSION_CODE)
+            }
+        }.onFailure { err ->
+            Log.d(TAG, "Crashlytics opt-in update skipped: ${err.message}")
+        }
+    }
+
+    fun configureCrashlytics(context: Context, enabled: Boolean = false) {
+        setCrashlyticsOptIn(context, enabled)
+    }
+
+    fun recordNonFatal(context: Context, throwable: Throwable) {
+        if (!crashlyticsOptedIn || !isAvailable(context)) return
         runCatching {
             FirebaseCrashlytics.getInstance().recordException(throwable)
         }
@@ -103,6 +123,7 @@ object FirebaseHelper {
         if (requirePermission && !hasNotificationPermission(context)) return false
         val token = sessionStorage.awaitLoaded().sessionToken
         if (token.isNullOrBlank()) return false
+        enablePushAutoInit(context)
         val fcmToken = fetchFcmToken(context) ?: return false
         return runCatching {
             val res = api.registerFcmToken(RegisterFcmRequest(token = fcmToken, label = defaultDeviceLabel()))

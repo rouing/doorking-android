@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
+import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,16 +52,23 @@ import androidx.glance.text.TextStyle
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.doorking.gate.DoorkingApp
 import com.doorking.gate.MainActivity
 import com.doorking.gate.R
+import com.doorking.gate.core.network.ApiClientFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.Serializable
+import java.util.UUID
 
 /**
  * Dedicated 1×1 single-relay Buzz Me In home-screen widget.
@@ -69,10 +78,9 @@ import kotlinx.coroutines.launch
 class RelaySingleWidget : GlanceAppWidget() {
 
     override val stateDefinition: GlanceStateDefinition<*> = PreferencesGlanceStateDefinition
-    override val sizeMode: SizeMode = SizeMode.Exact
+    override val sizeMode: SizeMode = SizeMode.Single
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(id)
         provideContent {
             val prefs = currentState<Preferences>()
             val gatePhone = prefs[KEY_GATE_PHONE].orEmpty()
@@ -84,7 +92,6 @@ class RelaySingleWidget : GlanceAppWidget() {
             val isError = prefs[KEY_IS_ERROR] ?: false
             GlanceTheme {
                 SingleRelayTileContent(
-                    appWidgetId = appWidgetId,
                     gatePhone = gatePhone,
                     relay = relay,
                     relayName = relayName,
@@ -95,6 +102,34 @@ class RelaySingleWidget : GlanceAppWidget() {
                 )
             }
         }
+    }
+
+    override suspend fun providePreview(context: Context, widgetCategory: Int) {
+        provideContent {
+            GlanceTheme {
+                SingleRelayTileContent(
+                    gatePhone = "",
+                    relay = 0,
+                    relayName = "Main Gate",
+                    unitCode = "",
+                    status = "",
+                    busy = false,
+                    isError = false,
+                )
+            }
+        }
+    }
+
+    override fun onCompositionError(
+        context: Context,
+        glanceId: GlanceId,
+        appWidgetId: Int,
+        throwable: Throwable,
+    ) {
+        val fallback = RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply {
+            setTextViewText(android.R.id.text1, "Tap to open Doorking Gate")
+        }
+        AppWidgetManager.getInstance(context).updateAppWidget(appWidgetId, fallback)
     }
 
     companion object {
@@ -130,12 +165,34 @@ class RelaySingleWidget : GlanceAppWidget() {
             }
             RelaySingleWidget().update(context, glanceId)
         }
+
+        suspend fun clearAll(context: Context) {
+            RelayWidgetPinHelper.clearPendingPins(context)
+            val widget = RelaySingleWidget()
+            val ids = runCatching {
+                GlanceAppWidgetManager(context).getGlanceIds(RelaySingleWidget::class.java)
+            }.getOrDefault(emptyList())
+            for (glanceId in ids) {
+                runCatching {
+                    updateAppWidgetState(context, glanceId) { prefs ->
+                        prefs.remove(KEY_GATE_PHONE)
+                        prefs.remove(KEY_GATE_NAME)
+                        prefs.remove(KEY_RELAY)
+                        prefs.remove(KEY_RELAY_NAME)
+                        prefs.remove(KEY_UNIT_CODE)
+                        prefs[KEY_BUSY] = false
+                        prefs[KEY_STATUS] = ""
+                        prefs[KEY_IS_ERROR] = false
+                    }
+                    widget.update(context, glanceId)
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun SingleRelayTileContent(
-    appWidgetId: Int,
     gatePhone: String,
     relay: Int,
     relayName: String,
@@ -157,7 +214,6 @@ private fun SingleRelayTileContent(
     val clickAction = if (gatePhone.isNotBlank() && !busy) {
         actionRunCallback<BuzzSingleRelayAction>(
             actionParametersOf(
-                BuzzSingleRelayAction.KEY_APP_WIDGET_ID to appWidgetId,
                 BuzzSingleRelayAction.KEY_PHONE to gatePhone,
                 BuzzSingleRelayAction.KEY_RELAY to relay,
                 BuzzSingleRelayAction.KEY_RELAY_NAME to relayName,
@@ -208,7 +264,9 @@ class BuzzSingleRelayAction : ActionCallback {
         glanceId: GlanceId,
         parameters: ActionParameters,
     ) {
-        val appWidgetId = parameters[KEY_APP_WIDGET_ID] ?: AppWidgetManager.INVALID_APPWIDGET_ID
+        val appWidgetId = runCatching {
+            GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
+        }.getOrDefault(AppWidgetManager.INVALID_APPWIDGET_ID)
         val phone = parameters[KEY_PHONE].orEmpty()
         val relay = parameters[KEY_RELAY] ?: 0
         val relayName = parameters[KEY_RELAY_NAME].orEmpty().ifBlank { "Gate" }
@@ -216,6 +274,7 @@ class BuzzSingleRelayAction : ActionCallback {
         if (phone.isBlank() || appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return
 
         val req = OneTimeWorkRequestBuilder<BuzzSingleRelayWorker>()
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .setInputData(
                 workDataOf(
                     BuzzSingleRelayWorker.DATA_WIDGET_ID to appWidgetId,
@@ -234,7 +293,6 @@ class BuzzSingleRelayAction : ActionCallback {
     }
 
     companion object {
-        val KEY_APP_WIDGET_ID = ActionParameters.Key<Int>("app_widget_id")
         val KEY_PHONE = ActionParameters.Key<String>("phone")
         val KEY_RELAY = ActionParameters.Key<Int>("relay")
         val KEY_RELAY_NAME = ActionParameters.Key<String>("relay_name")
@@ -248,6 +306,7 @@ class BuzzSingleRelayWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as? DoorkingApp ?: return Result.failure()
+        if (app.startupCrash != null) return Result.failure()
         val appWidgetId = inputData.getInt(DATA_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         val phone = inputData.getString(DATA_PHONE).orEmpty()
         val relay = inputData.getInt(DATA_RELAY, 0)
@@ -255,36 +314,61 @@ class BuzzSingleRelayWorker(
         val unitCode = inputData.getString(DATA_UNIT_CODE)?.ifBlank { null }
         if (phone.isBlank() || appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return Result.failure()
 
+        if (app.container.sessionStorage.awaitLoaded().sessionToken.isNullOrBlank()) {
+            RelaySingleWidget.clearAll(applicationContext)
+            return Result.failure()
+        }
+
         val manager = GlanceAppWidgetManager(applicationContext)
-        val glanceId = runCatching { manager.getGlanceIdBy(appWidgetId) }.getOrNull() ?: return Result.failure()
+        val initialGlanceId = runCatching { manager.getGlanceIdBy(appWidgetId) }.getOrNull() ?: return Result.failure()
         val widget = RelaySingleWidget()
 
-        updateAppWidgetState(applicationContext, glanceId) { prefs ->
-            prefs[RelaySingleWidget.KEY_BUSY] = true
-            prefs[RelaySingleWidget.KEY_IS_ERROR] = false
-            prefs[RelaySingleWidget.KEY_STATUS] = "Opening…"
+        runCatching {
+            updateAppWidgetState(applicationContext, initialGlanceId) { prefs ->
+                prefs[RelaySingleWidget.KEY_BUSY] = true
+                prefs[RelaySingleWidget.KEY_IS_ERROR] = false
+                prefs[RelaySingleWidget.KEY_STATUS] = "Opening…"
+            }
+            widget.update(applicationContext, initialGlanceId)
         }
-        widget.update(applicationContext, glanceId)
 
-        val outcome = GateWidgetRepository.buzz(app.container.api, phone, relay, relayName, unitCode)
-        val (statusText, isError) = when (outcome) {
-            is WidgetBuzzOutcome.Opened -> "Opened!" to false
-            is WidgetBuzzOutcome.Failed -> outcome.message.take(24) to true
-        }
-        updateAppWidgetState(applicationContext, glanceId) { prefs ->
-            prefs[RelaySingleWidget.KEY_BUSY] = false
-            prefs[RelaySingleWidget.KEY_IS_ERROR] = isError
-            prefs[RelaySingleWidget.KEY_STATUS] = statusText
-        }
-        widget.update(applicationContext, glanceId)
+        try {
+            val outcome = GateWidgetRepository.buzz(
+                api = app.container.api,
+                gatePhone = phone,
+                relay = relay,
+                relayName = relayName,
+                unitCode = unitCode,
+                noInteractiveStepUp = "1",
+            )
+            val (statusText, isError) = when (outcome) {
+                is WidgetBuzzOutcome.Opened -> "Opened!" to false
+                is WidgetBuzzOutcome.Failed -> outcome.message.take(24) to true
+            }
+            runCatching {
+                val postBuzzId = manager.getGlanceIdBy(appWidgetId)
+                updateAppWidgetState(applicationContext, postBuzzId) { prefs ->
+                    prefs[RelaySingleWidget.KEY_BUSY] = false
+                    prefs[RelaySingleWidget.KEY_IS_ERROR] = isError
+                    prefs[RelaySingleWidget.KEY_STATUS] = statusText
+                }
+                widget.update(applicationContext, postBuzzId)
+            }
 
-        delay(4_000L)
-        updateAppWidgetState(applicationContext, glanceId) { prefs ->
-            prefs[RelaySingleWidget.KEY_BUSY] = false
-            prefs[RelaySingleWidget.KEY_IS_ERROR] = false
-            prefs[RelaySingleWidget.KEY_STATUS] = ""
+            delay(4_000L)
+        } finally {
+            withContext(NonCancellable) {
+                runCatching {
+                    val resetId = manager.getGlanceIdBy(appWidgetId)
+                    updateAppWidgetState(applicationContext, resetId) { prefs ->
+                        prefs[RelaySingleWidget.KEY_BUSY] = false
+                        prefs[RelaySingleWidget.KEY_IS_ERROR] = false
+                        prefs[RelaySingleWidget.KEY_STATUS] = ""
+                    }
+                    widget.update(applicationContext, resetId)
+                }
+            }
         }
-        widget.update(applicationContext, glanceId)
         return Result.success()
     }
 
@@ -297,7 +381,21 @@ class BuzzSingleRelayWorker(
     }
 }
 
+@Serializable
+internal data class PendingPinConfig(
+    val gatePhone: String,
+    val gateName: String,
+    val relay: Int,
+    val relayName: String,
+    val unitCode: String? = null,
+    val createdAtMs: Long = System.currentTimeMillis(),
+)
+
 object RelayWidgetPinHelper {
+    private const val PREFS_PENDING_PINS = "doorking_pending_pins"
+    private const val PENDING_PIN_TTL_MS = 15L * 60L * 1000L
+    private val pinLock = Any()
+
     fun canPin(context: Context): Boolean =
         runCatching { AppWidgetManager.getInstance(context).isRequestPinAppWidgetSupported }.getOrDefault(false)
 
@@ -309,24 +407,94 @@ object RelayWidgetPinHelper {
         relayName: String,
         unitCode: String?,
     ): Boolean {
-        val manager = AppWidgetManager.getInstance(context)
-        if (!manager.isRequestPinAppWidgetSupported) return false
+        val manager = runCatching { AppWidgetManager.getInstance(context) }.getOrNull() ?: return false
+        val supported = runCatching { manager.isRequestPinAppWidgetSupported }.getOrDefault(false)
+        if (!supported) return false
+
+        val token = UUID.randomUUID().toString()
+        val config = PendingPinConfig(
+            gatePhone = gatePhone,
+            gateName = gateName,
+            relay = relay,
+            relayName = relayName,
+            unitCode = unitCode?.ifBlank { null },
+        )
+        storePendingPin(context, token, config)
+
         val provider = ComponentName(context, RelaySingleWidgetReceiver::class.java)
         val callbackIntent = Intent(context, RelayWidgetPinCallbackReceiver::class.java).apply {
             action = RelayWidgetPinCallbackReceiver.ACTION_PINNED
-            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_GATE_PHONE, gatePhone)
-            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_GATE_NAME, gateName)
-            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_RELAY, relay)
-            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_RELAY_NAME, relayName)
-            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_UNIT_CODE, unitCode.orEmpty())
+            putExtra(RelayWidgetPinCallbackReceiver.EXTRA_PIN_TOKEN, token)
         }
         val pi = PendingIntent.getBroadcast(
             context,
-            (gatePhone.hashCode() * 31) + relay,
+            token.hashCode(),
             callbackIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_MUTABLE,
         )
-        return manager.requestPinAppWidget(provider, null, pi)
+        val extras = Bundle().apply {
+            putParcelable(
+                AppWidgetManager.EXTRA_APPWIDGET_PREVIEW,
+                RemoteViews(context.packageName, R.layout.widget_preview_relay_single).apply {
+                    setTextViewText(R.id.preview_relay_title, relayName)
+                },
+            )
+        }
+        val requested = runCatching {
+            manager.requestPinAppWidget(provider, extras, pi)
+        }.getOrDefault(false)
+        if (!requested) {
+            removePendingPin(context, token)
+        }
+        return requested
+    }
+
+    private fun storePendingPin(context: Context, token: String, config: PendingPinConfig) {
+        synchronized(pinLock) {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_PINS, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val editor = prefs.edit()
+            for ((key, value) in prefs.all) {
+                val raw = value as? String ?: continue
+                val parsed = runCatching {
+                    ApiClientFactory.json.decodeFromString<PendingPinConfig>(raw)
+                }.getOrNull()
+                if (parsed == null || now - parsed.createdAtMs > PENDING_PIN_TTL_MS) {
+                    editor.remove(key)
+                }
+            }
+            editor.putString(token, ApiClientFactory.json.encodeToString(config))
+            editor.apply()
+        }
+    }
+
+    private fun removePendingPin(context: Context, token: String) {
+        synchronized(pinLock) {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_PINS, Context.MODE_PRIVATE)
+            prefs.edit().remove(token).apply()
+        }
+    }
+
+    internal fun consumePendingPin(context: Context, token: String): PendingPinConfig? {
+        synchronized(pinLock) {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_PINS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(token, null) ?: return null
+            prefs.edit().remove(token).apply()
+            val parsed = runCatching {
+                ApiClientFactory.json.decodeFromString<PendingPinConfig>(raw)
+            }.getOrNull() ?: return null
+            if (System.currentTimeMillis() - parsed.createdAtMs > PENDING_PIN_TTL_MS) {
+                return null
+            }
+            return parsed
+        }
+    }
+
+    internal fun clearPendingPins(context: Context) {
+        synchronized(pinLock) {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_PINS, Context.MODE_PRIVATE)
+            prefs.edit().clear().apply()
+        }
     }
 }
 
@@ -335,17 +503,33 @@ class RelayWidgetPinCallbackReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_PINNED) return
         val appWidgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         if (appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return
-        val gatePhone = intent.getStringExtra(EXTRA_GATE_PHONE).orEmpty()
-        val gateName = intent.getStringExtra(EXTRA_GATE_NAME).orEmpty()
-        val relay = intent.getIntExtra(EXTRA_RELAY, 0)
-        val relayName = intent.getStringExtra(EXTRA_RELAY_NAME).orEmpty().ifBlank { "Relay $relay" }
-        val unitCode = intent.getStringExtra(EXTRA_UNIT_CODE)?.ifBlank { null }
-        if (gatePhone.isBlank()) return
+
+        val expectedProvider = ComponentName(context, RelaySingleWidgetReceiver::class.java)
+        val actualProvider = runCatching {
+            AppWidgetManager.getInstance(context).getAppWidgetInfo(appWidgetId)?.provider
+        }.getOrNull()
+        if (actualProvider != expectedProvider) return
+
+        val token = intent.getStringExtra(EXTRA_PIN_TOKEN)?.takeIf { it.isNotBlank() } ?: return
+        val config = RelayWidgetPinHelper.consumePendingPin(context, token) ?: return
+        if (config.gatePhone.isBlank()) return
 
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                RelaySingleWidget.configureWidget(context.applicationContext, appWidgetId, gatePhone, gateName, relay, relayName, unitCode)
+                runCatching {
+                    withTimeout(8_000L) {
+                        RelaySingleWidget.configureWidget(
+                            context = context.applicationContext,
+                            appWidgetId = appWidgetId,
+                            gatePhone = config.gatePhone,
+                            gateName = config.gateName,
+                            relay = config.relay,
+                            relayName = config.relayName.ifBlank { "Relay ${config.relay}" },
+                            unitCode = config.unitCode?.ifBlank { null },
+                        )
+                    }
+                }
             } finally {
                 pending.finish()
             }
@@ -354,10 +538,6 @@ class RelayWidgetPinCallbackReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION_PINNED = "com.doorking.gate.widget.ACTION_RELAY_WIDGET_PINNED"
-        const val EXTRA_GATE_PHONE = "gate_phone"
-        const val EXTRA_GATE_NAME = "gate_name"
-        const val EXTRA_RELAY = "relay"
-        const val EXTRA_RELAY_NAME = "relay_name"
-        const val EXTRA_UNIT_CODE = "unit_code"
+        const val EXTRA_PIN_TOKEN = "pin_token"
     }
 }

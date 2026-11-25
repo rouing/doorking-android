@@ -1,0 +1,12 @@
+# Targeted R8 Full Mode (AGP 9) keep rules for reflectively instantiated AndroidX classes.
+# Note: ListenableWorker, InputMerger, and androidx.startup.Initializer are covered by AAR consumer rules.
+
+# Room / WorkManager internal RoomDatabase subclass no-arg constructor
+-keepclassmembers class * extends androidx.room.RoomDatabase {
+    public <init>();
+}
+
+# Glance ActionCallback public no-arg constructors (mandated by glance-appwidget-updates-and-memory)
+-keepclassmembers class * implements androidx.glance.appwidget.action.ActionCallback {
+    public <init>();
+}

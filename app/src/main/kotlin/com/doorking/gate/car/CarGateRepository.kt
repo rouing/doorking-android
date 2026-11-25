@@ -6,6 +6,9 @@ import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.BuzzRequest
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.PortalStatusReply
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 data class CarRelayTile(
     val key: String,
@@ -43,7 +46,7 @@ sealed interface CarBuzzResult {
 /**
  * Pure suspend loader/executor for Android Auto (`androidx.car.app.category.IOT`).
  * Resolves all resident-buzzable gate relays accessible to the signed-in account and pulses relays
- * via the existing `/api/gates/{phone}/portal/open` endpoint.
+ * via `/api/portal/gates/{phone}/buzz` with `X-Doorking-No-Interactive-StepUp: 1`.
  */
 object CarGateRepository {
 
@@ -80,35 +83,41 @@ object CarGateRepository {
             )
         }
 
+        val perGateResults = coroutineScope {
+            candidatePhones.map { phone ->
+                async {
+                    val portalMe = runCatching { api.getPortalMe(phone) }.getOrNull() ?: return@async null
+                    if (!portalMe.portal.buzzEnabled || portalMe.portal.buzzRelayLabels.isEmpty()) {
+                        return@async null
+                    }
+                    val gateName = portalMe.gate.siteName.ifBlank { phone }
+                    val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
+                    val resolved = resolveTileStatus(portalMe.portal.requirePasskeyForBuzz, status)
+                    val gateTiles = portalMe.portal.buzzRelayLabels.map { relay ->
+                        CarRelayTile(
+                            key = "$phone:${relay.relay}",
+                            gatePhone = phone,
+                            gateName = gateName,
+                            unitCode = portalMe.unit.directoryCode.ifBlank { null },
+                            relay = relay.relay,
+                            relayName = relay.name.ifBlank { "Gate ${relay.relay + 1}" },
+                            statusText = resolved.statusText,
+                            canBuzz = resolved.canBuzz,
+                            requirePasskey = portalMe.portal.requirePasskeyForBuzz,
+                            isBusy = resolved.isBusy,
+                            cooldownSeconds = resolved.cooldownSeconds,
+                        )
+                    }
+                    gateName to gateTiles
+                }
+            }.awaitAll().filterNotNull()
+        }
+
         val tiles = mutableListOf<CarRelayTile>()
         val gateNames = linkedSetOf<String>()
-
-        for (phone in candidatePhones) {
-            val portalMe = runCatching { api.getPortalMe(phone) }.getOrNull() ?: continue
-            if (!portalMe.portal.buzzEnabled || portalMe.portal.buzzRelayLabels.isEmpty()) continue
-
-            val gateName = portalMe.gate.siteName.ifBlank { phone }
+        for ((gateName, gateTiles) in perGateResults) {
             gateNames.add(gateName)
-            val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
-            val resolved = resolveTileStatus(portalMe.portal.requirePasskeyForBuzz, status)
-
-            for (relay in portalMe.portal.buzzRelayLabels) {
-                tiles.add(
-                    CarRelayTile(
-                        key = "$phone:${relay.relay}",
-                        gatePhone = phone,
-                        gateName = gateName,
-                        unitCode = portalMe.unit.directoryCode.ifBlank { null },
-                        relay = relay.relay,
-                        relayName = relay.name.ifBlank { "Gate ${relay.relay + 1}" },
-                        statusText = resolved.statusText,
-                        canBuzz = resolved.canBuzz,
-                        requirePasskey = portalMe.portal.requirePasskeyForBuzz,
-                        isBusy = resolved.isBusy,
-                        cooldownSeconds = resolved.cooldownSeconds,
-                    ),
-                )
-            }
+            tiles.addAll(gateTiles)
         }
 
         if (tiles.isEmpty()) {
@@ -126,17 +135,19 @@ object CarGateRepository {
     }
 
     /**
-     * Lightweight polling path: calls ONLY `GET /api/portal/gates/{phone}/status` once per distinct
-     * gate phone in [current], updating `statusText`, `canBuzz`, `isBusy`, and `cooldownSeconds` in place.
+     * Lightweight polling path: calls ONLY `GET /api/portal/gates/{phone}/status` in parallel once
+     * per distinct gate phone in [current], updating `statusText`, `canBuzz`, `isBusy`, and
+     * `cooldownSeconds` in place.
      */
     suspend fun refreshStatusesOnly(
         api: DoorkingApi,
         current: CarGateUiState.Ready,
     ): CarGateUiState.Ready {
-        val statusByPhone = linkedMapOf<String, PortalStatusReply?>()
-        for (phone in current.relays.map { it.gatePhone }.distinct()) {
-            if (phone.isBlank()) continue
-            statusByPhone[phone] = runCatching { api.getPortalStatus(phone) }.getOrNull()
+        val phones = current.relays.map { it.gatePhone }.distinct().filter { it.isNotBlank() }
+        val statusByPhone: Map<String, PortalStatusReply?> = coroutineScope {
+            phones.map { phone ->
+                async { phone to runCatching { api.getPortalStatus(phone) }.getOrNull() }
+            }.awaitAll().toMap()
         }
         val updatedRelays = current.relays.map { tile ->
             val status = statusByPhone[tile.gatePhone] ?: return@map tile
@@ -149,6 +160,27 @@ object CarGateRepository {
             )
         }
         return current.copy(relays = updatedRelays)
+    }
+
+    /**
+     * Decrements any active local cooldown countdown without hitting the network so Android Auto
+     * displays smooth per-second updates between server polls.
+     */
+    fun tickLocalCooldown(
+        current: CarGateUiState.Ready,
+        elapsedSeconds: Int = 1,
+    ): CarGateUiState.Ready {
+        if (elapsedSeconds <= 0) return current
+        val updated = current.relays.map { tile ->
+            if (tile.isBusy || tile.requirePasskey || tile.cooldownSeconds <= 0) return@map tile
+            val remaining = (tile.cooldownSeconds - elapsedSeconds).coerceAtLeast(0)
+            tile.copy(
+                cooldownSeconds = remaining,
+                statusText = if (remaining > 0) "Wait ${remaining}s" else "Tap to open",
+                canBuzz = remaining == 0,
+            )
+        }
+        return current.copy(relays = updated)
     }
 
     private data class TileStatus(
@@ -189,7 +221,11 @@ object CarGateRepository {
             return CarBuzzResult.RequiresPhonePasskey
         }
         return runCatching {
-            val res = api.portalBuzz(tile.gatePhone, BuzzRequest(relay = tile.relay, code = tile.unitCode))
+            val res = api.portalBuzz(
+                phone = tile.gatePhone,
+                body = BuzzRequest(relay = tile.relay, code = tile.unitCode),
+                noInteractiveStepUp = "1",
+            )
             if (!res.isSuccessful) {
                 val raw = res.errorBody()?.string().orEmpty()
                 val parsed = runCatching {

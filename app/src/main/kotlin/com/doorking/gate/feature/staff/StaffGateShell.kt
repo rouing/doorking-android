@@ -4,16 +4,14 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -79,8 +77,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
@@ -132,9 +129,10 @@ fun StaffGateShell(
     onOpenResidentPortal: (() -> Unit)?,
     onSignOut: () -> Unit,
 ) {
+    val factory = remember(container, gatePhone) { StaffGateViewModel.factory(container, gatePhone) }
     val vm: StaffGateViewModel = viewModel(
         key = "staff-$gatePhone",
-        factory = StaffGateViewModel.factory(container, gatePhone),
+        factory = factory,
     )
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(StaffTab.Residents) }
@@ -208,13 +206,10 @@ fun StaffGateShell(
         vm.clearBanner()
     }
 
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        vm.refreshJob()
-    }
-
-    LaunchedEffect(showGateSheet, showJobDialog) {
-        if (showGateSheet || showJobDialog) {
-            vm.refreshJob()
+    LifecycleStartEffect(vm) {
+        vm.setActive(true)
+        onStopOrDispose {
+            vm.setActive(false)
         }
     }
 
@@ -260,12 +255,12 @@ fun StaffGateShell(
                         enabled = state.transactions.isNotEmpty(),
                         onClick = {
                             showActivityExportDialog = false
-                            val csv = PdfShareHelper.buildTransactionsCsv(state.transactions)
+                            val transactions = state.transactions
                             scope.launch {
-                                PdfShareHelper.shareCsvText(
+                                PdfShareHelper.shareTransactionsCsv(
                                     context = context,
                                     filename = "transactions-$gatePhone.csv",
-                                    csvContent = csv,
+                                    rows = transactions,
                                     subject = "Gate Activity Export",
                                 ).onFailure { err ->
                                     snackbar.showSnackbar(err.message ?: "CSV export failed")
@@ -317,8 +312,14 @@ fun StaffGateShell(
                     vm.startPull(what)
                     showJobDialog = true
                 },
-                onOpenLiveRelays = { showRelaysSheet = true },
-                onShowProgress = { showJobDialog = true },
+                onOpenLiveRelays = {
+                    showRelaysSheet = true
+                    vm.refreshRelays()
+                },
+                onShowProgress = {
+                    showJobDialog = true
+                    vm.refreshJob()
+                },
                 onClose = { showGateSheet = false },
             )
         }
@@ -341,11 +342,28 @@ fun StaffGateShell(
     val gateTitle = session?.gate?.siteName?.ifBlank { gatePhone } ?: gatePhone
     val running = state.job?.state == "running"
     val hasEdits = state.residentsReply?.cache?.edited == true
-    val hasOwnPortalUnit = session?.hasPortalUnit == true ||
-        (state.prefs.residentPortal?.enabled == true &&
-            state.residentsReply?.rows?.any { row ->
-                row.portalEnabled == true && row.portalUsername.equals(session?.user, ignoreCase = true)
-            } == true)
+    val hasOwnPortalUnit = remember(
+        session?.hasPortalUnit,
+        session?.user,
+        state.prefs.residentPortal?.enabled,
+        state.residentsReply?.rows,
+    ) {
+        session?.hasPortalUnit == true ||
+            (state.prefs.residentPortal?.enabled == true &&
+                state.residentsReply?.rows?.any { row ->
+                    row.portalEnabled == true && row.portalUsername.equals(session?.user, ignoreCase = true)
+                } == true)
+    }
+    val rowsForTab = remember(state.residentsReply?.rows, tab) {
+        if (tab == StaffTab.Residents || tab == StaffTab.Vendors) {
+            val isVendor = tab == StaffTab.Vendors
+            state.residentsReply?.rows.orEmpty().filter {
+                isVisibleDirectoryRow(it) && it.type.equals("Vendor", ignoreCase = true) == isVendor
+            }
+        } else {
+            emptyList()
+        }
+    }
 
     val topTitle = when (subScreen) {
         null -> gateTitle
@@ -391,19 +409,16 @@ fun StaffGateShell(
                         when (tab) {
                             StaffTab.Residents, StaffTab.Vendors -> {
                                 val isVendor = tab == StaffTab.Vendors
-                                val rowsForTab = state.residentsReply?.rows.orEmpty().filter {
-                                    isVisibleDirectoryRow(it) && it.type.equals("Vendor", ignoreCase = true) == isVendor
-                                }
                                 IconButton(
                                     enabled = rowsForTab.isNotEmpty(),
                                     onClick = {
-                                        val csv = PdfShareHelper.buildDirectoryCsv(rowsForTab, isVendor = isVendor)
                                         val kindName = if (isVendor) "vendors" else "residents"
                                         scope.launch {
-                                            PdfShareHelper.shareCsvText(
+                                            PdfShareHelper.shareDirectoryCsv(
                                                 context = context,
                                                 filename = "$kindName-$gatePhone.csv",
-                                                csvContent = csv,
+                                                rows = rowsForTab,
+                                                isVendor = isVendor,
                                                 subject = if (isVendor) "Vendors Export" else "Residents Export",
                                             ).onFailure { err ->
                                                 snackbar.showSnackbar(err.message ?: "CSV export failed")
@@ -481,7 +496,10 @@ fun StaffGateShell(
                 )
                 NavigationBarItem(
                     selected = showGateSheet,
-                    onClick = { showGateSheet = true },
+                    onClick = {
+                        showGateSheet = true
+                        vm.refreshJob()
+                    },
                     icon = {
                         BadgedBox(
                             badge = {
@@ -625,7 +643,10 @@ fun StaffGateShell(
                     StaffMoreTab(
                         session = session,
                         onNavigate = { subScreen = it },
-                        onOpenLiveRelays = { showRelaysSheet = true },
+                        onOpenLiveRelays = {
+                            showRelaysSheet = true
+                            vm.refreshRelays()
+                        },
                         onSwitchGate = onSwitchGate,
                         onOpenResidentPortal = if (hasOwnPortalUnit) onOpenResidentPortal else null,
                     )
@@ -643,67 +664,65 @@ private fun StaffMoreTab(
     onSwitchGate: () -> Unit,
     onOpenResidentPortal: (() -> Unit)?,
 ) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item(key = "admin") {
-            SectionCard(
-                title = "Management & Monitoring",
-                tonal = true,
-                trailing = {
-                    val role = session?.gate?.role.orEmpty().replaceFirstChar(Char::uppercase)
-                    if (role.isNotBlank()) StatusPill(text = role, tone = PillTone.Primary)
-                },
+        SectionCard(
+            title = "Management & Monitoring",
+            tonal = true,
+            trailing = {
+                val role = session?.gate?.role.orEmpty().replaceFirstChar(Char::uppercase)
+                if (role.isNotBlank()) StatusPill(text = role, tone = PillTone.Primary)
+            },
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
             ) {
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                ) {
-                    Column {
-                        MoreListItem("Access Insights", "Dormant credentials, unknown cards & traffic", Icons.Rounded.Analytics) {
-                            onNavigate(MoreSubScreen.Insights)
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("History & Pull Archive", "Events, Revert, point-in-time restore", Icons.Rounded.History) {
-                            onNavigate(MoreSubScreen.History)
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("Scheduled Transfers", "Automatic pulls, clips & sends", Icons.Rounded.Schedule) {
-                            onNavigate(MoreSubScreen.Schedules)
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("Board Settings", "Facility codes, Holidays, Time zones, Hold open, Display", Icons.Rounded.Tune) {
-                            onNavigate(MoreSubScreen.Board(BoardSection.Facility))
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("System Settings", "DKS login, Users, Portal, Audit, API keys, Webhooks", Icons.Rounded.Settings) {
-                            onNavigate(MoreSubScreen.SystemSettings)
-                        }
+                Column {
+                    MoreListItem("Access Insights", "Dormant credentials, unknown cards & traffic", Icons.Rounded.Analytics) {
+                        onNavigate(MoreSubScreen.Insights)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("History & Pull Archive", "Events, Revert, point-in-time restore", Icons.Rounded.History) {
+                        onNavigate(MoreSubScreen.History)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("Scheduled Transfers", "Automatic pulls, clips & sends", Icons.Rounded.Schedule) {
+                        onNavigate(MoreSubScreen.Schedules)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("Board Settings", "Facility codes, Holidays, Time zones, Hold open, Display", Icons.Rounded.Tune) {
+                        onNavigate(MoreSubScreen.Board(BoardSection.Facility))
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("System Settings", "DKS login, Users, Portal, Audit, API keys, Webhooks", Icons.Rounded.Settings) {
+                        onNavigate(MoreSubScreen.SystemSettings)
                     }
                 }
             }
         }
 
-        item(key = "quick") {
-            SectionCard(title = "Gate & Account", tonal = true) {
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                ) {
-                    Column {
-                        MoreListItem("Live Relays", "Hold open, timed release & status", Icons.Rounded.LockOpen, onOpenLiveRelays)
+        SectionCard(title = "Gate & Account", tonal = true) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            ) {
+                Column {
+                    MoreListItem("Live Relays", "Hold open, timed release & status", Icons.Rounded.LockOpen, onOpenLiveRelays)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("Switch Gate", "Return to all gates", Icons.Rounded.SwapHoriz, onSwitchGate)
+                    if (onOpenResidentPortal != null) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("Switch Gate", "Return to all gates", Icons.Rounded.SwapHoriz, onSwitchGate)
-                        if (onOpenResidentPortal != null) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            MoreListItem("Resident Portal", "Switch to your unit's resident view", Icons.Rounded.Fence, onOpenResidentPortal)
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        MoreListItem("User Settings", session?.user.orEmpty(), Icons.Rounded.Person) {
-                            onNavigate(MoreSubScreen.Account)
-                        }
+                        MoreListItem("Resident Portal", "Switch to your unit's resident view", Icons.Rounded.Fence, onOpenResidentPortal)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    MoreListItem("User Settings", session?.user.orEmpty(), Icons.Rounded.Person) {
+                        onNavigate(MoreSubScreen.Account)
                     }
                 }
             }

@@ -44,6 +44,27 @@ object ApiClientFactory {
         return builder.build()
     }
 
+    /**
+     * Dedicated OkHttpClient with its own Dispatcher and no interactive step-up coordinator so
+     * step-up verification requests (`getStepUpOptions`, `confirmStepUp`, `getBiometricStepUpChallenge`)
+     * can never deadlock behind `maxRequestsPerHost = 5` blocked calls on the primary client.
+     */
+    fun createStepUpOkHttp(
+        sessionStorage: SessionStorage,
+        authEvents: AuthEventBus,
+        debugLogging: Boolean = false,
+    ): OkHttpClient = createOkHttp(
+        sessionStorage = sessionStorage,
+        authEvents = authEvents,
+        debugLogging = debugLogging,
+        authInterceptor = DoorkingAuthInterceptor(
+            sessionStorage = sessionStorage,
+            authEvents = authEvents,
+            json = json,
+            stepUpCoordinator = null,
+        ),
+    )
+
     fun createApi(
         okHttpClient: OkHttpClient,
         baseUrl: String = "$DEFAULT_SERVER_URL/",

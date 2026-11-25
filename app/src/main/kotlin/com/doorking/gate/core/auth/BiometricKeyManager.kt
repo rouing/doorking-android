@@ -5,6 +5,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -39,7 +41,7 @@ object BiometricKeyManager {
      * Generates (or replaces) a hardware-backed ECDSA P-256 signing key that requires a live strong
      * biometric scan on every signing operation, returning its new `keyId` and base64 SPKI DER public key.
      */
-    fun generateFreshKey(): RegisteredKeyMaterial {
+    suspend fun generateFreshKey(): RegisteredKeyMaterial = withContext(Dispatchers.IO) {
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         if (ks.containsAlias(KEY_ALIAS)) {
             ks.deleteEntry(KEY_ALIAS)
@@ -55,7 +57,7 @@ object BiometricKeyManager {
         kpg.initialize(spec)
         val keyPair = kpg.generateKeyPair()
         val spki = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP)
-        return RegisteredKeyMaterial(
+        RegisteredKeyMaterial(
             keyId = "and-${UUID.randomUUID()}",
             publicKeySpkiBase64 = spki,
             label = deviceLabel(),
@@ -66,28 +68,32 @@ object BiometricKeyManager {
      * Prepares a `SHA256withECDSA` `Signature` bound to the hardware private key for `BiometricPrompt.CryptoObject`.
      * Returns `null` if the key does not exist or was invalidated by a new biometric enrollment.
      */
-    fun initSigningCrypto(): Signature? = runCatching {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        val privateKey = ks.getKey(KEY_ALIAS, null) as? PrivateKey ?: return null
-        Signature.getInstance("SHA256withECDSA").apply {
-            initSign(privateKey)
+    suspend fun initSigningCrypto(): Signature? = withContext(Dispatchers.IO) {
+        try {
+            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val privateKey = ks.getKey(KEY_ALIAS, null) as? PrivateKey ?: return@withContext null
+            Signature.getInstance("SHA256withECDSA").apply {
+                initSign(privateKey)
+            }
+        } catch (err: Throwable) {
+            if (err is KeyPermanentlyInvalidatedException) deleteLocalKey()
+            null
         }
-    }.getOrElse { err ->
-        if (err is KeyPermanentlyInvalidatedException) deleteLocalKey()
-        null
     }
 
     /** Signs a server-issued UTF-8 challenge using the `Signature` unlocked by `BiometricPrompt`. */
-    fun signChallenge(unlockedSignature: Signature, challenge: String): String {
+    suspend fun signChallenge(unlockedSignature: Signature, challenge: String): String = withContext(Dispatchers.IO) {
         unlockedSignature.update(challenge.toByteArray(Charsets.UTF_8))
         val derSignature = unlockedSignature.sign()
-        return Base64.encodeToString(derSignature, Base64.NO_WRAP)
+        Base64.encodeToString(derSignature, Base64.NO_WRAP)
     }
 
-    fun deleteLocalKey() {
-        runCatching {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            if (ks.containsAlias(KEY_ALIAS)) ks.deleteEntry(KEY_ALIAS)
+    suspend fun deleteLocalKey() {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                if (ks.containsAlias(KEY_ALIAS)) ks.deleteEntry(KEY_ALIAS)
+            }
         }
     }
 }

@@ -187,6 +187,17 @@ object GateAppFunctionLogic {
         val tiles = loadReadyTiles(sessionStorage, api)
         val tile = matchRelayTile(tiles, relayName, gateName)
 
+        if (sessionStorage.state.value.biometricLockEnabled) {
+            return OpenGateResult(
+                gateName = tile.gateName,
+                relayName = tile.relayName,
+                opened = false,
+                alreadyOpen = false,
+                message = "Doorking Gate is locked. Open the app and unlock to open ${tile.relayName}.",
+                openAppIntent = openAppIntentProvider(),
+            )
+        }
+
         if (tile.requirePasskey) {
             return OpenGateResult(
                 gateName = tile.gateName,

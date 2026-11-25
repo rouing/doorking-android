@@ -2,10 +2,13 @@ package com.doorking.gate.car
 
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
+import com.doorking.gate.core.network.DoorkingAuthInterceptor
 import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.test.runTest
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -167,8 +170,13 @@ class CarGateRepositoryTest {
 
     @Test
     fun refreshStatusesOnlyCallsPortalStatusOncePerDistinctGateAndUpdatesTiles() = runTest {
-        server.enqueue(json("""{"available":true,"cooldownSeconds":24}"""))
-        server.enqueue(json("""{"available":false,"busyReason":"pulling","percent":60,"cooldownSeconds":0}"""))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/portal/gates/2145550100/status" -> json("""{"available":true,"cooldownSeconds":24}""")
+                "/api/portal/gates/2145550200/status" -> json("""{"available":false,"busyReason":"pulling","percent":60,"cooldownSeconds":0}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
 
         val (_, api) = createClient()
         val initial = CarGateUiState.Ready(
@@ -213,10 +221,13 @@ class CarGateRepositoryTest {
 
         val refreshed = CarGateRepository.refreshStatusesOnly(api, initial)
 
-        // Only 2 HTTP calls total (one /status per distinct gatePhone — no session/gates/portal/me calls).
+        // Only 2 HTTP calls total (one /status per distinct gatePhone — fetched in parallel).
         assertEquals(2, server.requestCount)
-        assertEquals("/api/portal/gates/2145550100/status", server.takeRequest().path)
-        assertEquals("/api/portal/gates/2145550200/status", server.takeRequest().path)
+        val paths = setOf(server.takeRequest().path, server.takeRequest().path)
+        assertEquals(
+            setOf("/api/portal/gates/2145550100/status", "/api/portal/gates/2145550200/status"),
+            paths,
+        )
 
         // Both relays on gate 2145550100 updated to cooldown state.
         assertEquals("Wait 24s", refreshed.relays[0].statusText)
@@ -233,6 +244,69 @@ class CarGateRepositoryTest {
         assertFalse(refreshed.relays[2].canBuzz)
         assertTrue(refreshed.relays[2].isBusy)
         assertEquals(0, refreshed.relays[2].cooldownSeconds)
+    }
+
+    @Test
+    fun tickLocalCooldownCountsDownAndReenablesBuzzAtZero() {
+        val state = CarGateUiState.Ready(
+            title = "Oakridge Condos",
+            multipleGates = false,
+            relays = listOf(
+                CarRelayTile(
+                    key = "2145550100:0",
+                    gatePhone = "2145550100",
+                    gateName = "Oakridge Condos",
+                    unitCode = "101",
+                    relay = 0,
+                    relayName = "Main Gate",
+                    statusText = "Wait 2s",
+                    canBuzz = false,
+                    requirePasskey = false,
+                    cooldownSeconds = 2,
+                ),
+            ),
+        )
+
+        val afterOne = CarGateRepository.tickLocalCooldown(state, 1)
+        assertEquals("Wait 1s", afterOne.relays.single().statusText)
+        assertEquals(1, afterOne.relays.single().cooldownSeconds)
+        assertFalse(afterOne.relays.single().canBuzz)
+
+        val afterTwo = CarGateRepository.tickLocalCooldown(afterOne, 1)
+        assertEquals("Tap to open", afterTwo.relays.single().statusText)
+        assertEquals(0, afterTwo.relays.single().cooldownSeconds)
+        assertTrue(afterTwo.relays.single().canBuzz)
+    }
+
+    @Test
+    fun buzzOn403StepUpFailsFastWithoutInvokingInteractiveCoordinator() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_testtoken")
+        val events = AuthEventBus()
+        var prompted = 0
+        val interceptor = DoorkingAuthInterceptor(storage, events, ApiClientFactory.json) {
+            prompted++
+            true
+        }
+        val api = ApiClientFactory.createApi(
+            ApiClientFactory.createOkHttp(storage, events, authInterceptor = interceptor),
+            "$baseUrl/",
+        )
+        server.enqueue(json("""{"stepUp":true,"hasPasskey":true,"error":"Confirm on phone"}""", code = 403))
+
+        val tile = CarRelayTile(
+            key = "2145550100:0",
+            gatePhone = "2145550100",
+            gateName = "Oakridge Condos",
+            unitCode = "101",
+            relay = 0,
+            relayName = "Main Gate",
+            statusText = "Tap to open",
+            canBuzz = true,
+            requirePasskey = false,
+        )
+        assertEquals(CarBuzzResult.RequiresPhonePasskey, CarGateRepository.buzz(api, tile))
+        assertEquals(0, prompted)
     }
 
     @Test

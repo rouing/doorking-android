@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -41,12 +42,15 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,6 +74,7 @@ import com.doorking.gate.core.ui.components.MonthDayPickerField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.TimePickerField
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -150,8 +155,12 @@ private val FACTORY_DISPLAY_DEFAULTS = mapOf(
     "systemInstruction" to "push a-z to find name or no. enter code or push call",
 )
 
+private val WHITESPACE_REGEX = Regex("\\s+")
+private val SECURITY_TIME_ZONES = listOf(1, 2, 3, 4)
+private val HOLD_OPEN_LABELS = listOf("1", "2", "3", "4", "5", "6", "7", "Hol")
+
 private fun isCustomizedDisplayField(field: GateSettingRowDto): Boolean {
-    val norm = field.value.trim().lowercase().replace(Regex("\\s+"), " ")
+    val norm = field.value.trim().lowercase().replace(WHITESPACE_REGEX, " ")
     if (norm.isEmpty()) return false
     val factoryDefault = FACTORY_DISPLAY_DEFAULTS[field.key]
     return factoryDefault == null || norm != factoryDefault
@@ -307,23 +316,26 @@ fun BoardSettingsScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun load(initial: Boolean = false) {
+    suspend fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         error = null
-        scope.launch {
-            runCatching { api.getSettings(gatePhone).fields }
-                .onSuccess { loaded ->
-                    fields = loaded
-                    if (!displayModeInitialized) {
-                        displayMode = detectInitialDisplayLayout(loaded)
-                        displayModeInitialized = true
-                    }
-                    edits.clear()
-                    loading = false
-                    refreshing = false
+        runCatching { api.getSettings(gatePhone).fields }
+            .onSuccess { loaded ->
+                fields = loaded
+                if (!displayModeInitialized) {
+                    displayMode = detectInitialDisplayLayout(loaded)
+                    displayModeInitialized = true
                 }
-                .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
-        }
+                edits.clear()
+                loading = false
+                refreshing = false
+            }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     LaunchedEffect(gatePhone) { load(initial = true) }
@@ -365,11 +377,24 @@ fun BoardSettingsScreen(
 
     // Surface Save (green) / Discard (red) to the Gate bottom sheet whenever this screen is open.
     val unsavedCount = edits.size
-    LaunchedEffect(unsavedCount, readOnly) {
-        if (readOnly) {
-            onDraftChange(null)
-        } else {
-            onDraftChange(SettingsDraftActions(unsavedCount = unsavedCount, save = saveDraft, discard = discardDraft))
+    val latestSaveDraft by rememberUpdatedState(saveDraft)
+    val latestDiscardDraft by rememberUpdatedState(discardDraft)
+    val lastReportedDraftKey = remember(gatePhone) { arrayOfNulls<Pair<Int, Boolean>>(1) }
+    SideEffect {
+        val nextKey = unsavedCount to readOnly
+        if (lastReportedDraftKey[0] != nextKey) {
+            lastReportedDraftKey[0] = nextKey
+            if (readOnly) {
+                onDraftChange(null)
+            } else {
+                onDraftChange(
+                    SettingsDraftActions(
+                        unsavedCount = unsavedCount,
+                        save = { latestSaveDraft() },
+                        discard = { latestDiscardDraft() },
+                    ),
+                )
+            }
         }
     }
     DisposableEffect(Unit) {
@@ -382,9 +407,14 @@ fun BoardSettingsScreen(
             else -> fields.filter { it.group == section.group }
         }
     }
+    val byKey = remember(sectionFields) { sectionFields.associateBy { it.key } }
+    val codeFields = remember(sectionFields) { sectionFields.filter { it.key != "facilityEnabled" } }
+    val holFields = remember(sectionFields) { sectionFields.filter { it.key != "holidaysForSecurity" } }
+    val holSwitch = remember(sectionFields) { sectionFields.firstOrNull { it.key == "holidaysForSecurity" } }
 
     val facilityToggleField = remember(fields) { fields.firstOrNull { it.key == "facilityEnabled" } }
     val facilityEnabled = facilityToggleField?.let { current(it) == "Yes" } ?: false
+    val holidaysForSecurityField = remember(fields) { fields.firstOrNull { it.key == "holidaysForSecurity" } }
 
     fun clearTarget(f: GateSettingRowDto): String? = when (section) {
         BoardSection.Facility -> if (f.key == "facilityEnabled") "No" else ""
@@ -398,9 +428,13 @@ fun BoardSettingsScreen(
     }
 
     val supportsClear = section in setOf(BoardSection.Facility, BoardSection.Holidays, BoardSection.HoldOpen)
-    val canClear = !readOnly && supportsClear && sectionFields.any { f ->
-        val cleared = clearTarget(f)
-        cleared != null && current(f) != cleared
+    val canClear by remember(sectionFields, section, readOnly) {
+        derivedStateOf {
+            !readOnly && supportsClear && sectionFields.any { f ->
+                val cleared = clearTarget(f)
+                cleared != null && (edits[f.key] ?: f.value) != cleared
+            }
+        }
     }
 
     if (loading && fields.isEmpty()) {
@@ -424,7 +458,7 @@ fun BoardSettingsScreen(
 
         PullToRefreshBox(
             isRefreshing = refreshing,
-            onRefresh = { load(initial = false) },
+            onRefresh = { scope.launch { load(initial = false) } },
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             LazyColumn(
@@ -433,7 +467,7 @@ fun BoardSettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 // Header row: title + optional inline Facility Codes toggle + right-aligned Red Clear button
-                item(key = "header") {
+                item(key = "header", contentType = "header") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -480,13 +514,16 @@ fun BoardSettingsScreen(
                     }
                 }
 
-                if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
+                if (error != null) {
+                    item(key = "err", contentType = "error") {
+                        ErrorBanner(error!!, onRetry = { scope.launch { load(initial = false) } })
+                    }
+                }
 
                 when (section) {
                     BoardSection.Facility -> {
                         if (facilityEnabled) {
-                            val codeFields = sectionFields.filter { it.key != "facilityEnabled" }
-                            items(codeFields, key = { it.key }) { setting ->
+                            items(codeFields, key = { it.key }, contentType = { "facility_code" }) { setting ->
                                 val cur = current(setting)
                                 val dirty = setting.key in edits
                                 val pending = setting.value != setting.gate
@@ -520,9 +557,7 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.Holidays -> {
-                        val holFields = sectionFields.filter { it.key != "holidaysForSecurity" }
-                        val holSwitch = sectionFields.firstOrNull { it.key == "holidaysForSecurity" }
-                        item(key = "hol-tools") {
+                        item(key = "hol-tools", contentType = "holiday_tools") {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -544,7 +579,7 @@ fun BoardSettingsScreen(
                             }
                         }
                         if (holSwitch != null) {
-                            item(key = holSwitch.key) {
+                            item(key = holSwitch.key, contentType = "holiday_switch") {
                                 val cur = current(holSwitch) == "Yes"
                                 BubbleCard {
                                     Row(
@@ -571,8 +606,7 @@ fun BoardSettingsScreen(
                                 }
                             }
                         }
-                        items(holFields.indices.toList(), key = { holFields[it].key }) { idx ->
-                            val setting = holFields[idx]
+                        itemsIndexed(holFields, key = { _, setting -> setting.key }, contentType = { _, _ -> "holiday_row" }) { idx, setting ->
                             val cur = current(setting)
                             val dirty = setting.key in edits
                             val pending = setting.value != setting.gate
@@ -603,8 +637,7 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.Security -> {
-                        val holOn = fields.firstOrNull { it.key == "holidaysForSecurity" }?.let { current(it) == "Yes" } ?: false
-                        val byKey = sectionFields.associateBy { it.key }
+                        val holOn = holidaysForSecurityField?.let { current(it) == "Yes" } ?: false
                         fun activeCountForLevel(lvl: Int): Int = (1..4).count { tz ->
                             val b = byKey["sec${lvl}tz${tz}Begin"]?.let { current(it) }.orEmpty()
                             val e = byKey["sec${lvl}tz${tz}End"]?.let { current(it) }.orEmpty()
@@ -616,7 +649,7 @@ fun BoardSettingsScreen(
                             return if (active > 0) "Level $num · $active active" else "Level $num"
                         }
 
-                        item(key = "sec-picker") {
+                        item(key = "sec-picker", contentType = "security_picker") {
                             ExposedDropdownMenuBox(
                                 expanded = securityMenuOpen,
                                 onExpandedChange = { securityMenuOpen = it },
@@ -648,7 +681,7 @@ fun BoardSettingsScreen(
                                 }
                             }
                         }
-                        items(listOf(1, 2, 3, 4), key = { "tz-$securityLevel-$it" }) { tz ->
+                        items(SECURITY_TIME_ZONES, key = { "tz-$securityLevel-$it" }, contentType = { "security_tz" }) { tz ->
                             val begin = byKey["sec${securityLevel}tz${tz}Begin"]
                             val end = byKey["sec${securityLevel}tz${tz}End"]
                             val days = byKey["sec${securityLevel}tz${tz}Days"]
@@ -729,10 +762,7 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.HoldOpen -> {
-                        val labels = listOf("1", "2", "3", "4", "5", "6", "7", "Hol")
-                        val byKey = sectionFields.associateBy { it.key }
-                        items(labels.indices.toList(), key = { "ho-${labels[it]}" }) { rowIndex ->
-                            val lbl = labels[rowIndex]
+                        itemsIndexed(HOLD_OPEN_LABELS, key = { _, lbl -> "ho-$lbl" }, contentType = { _, _ -> "hold_open_row" }) { rowIndex, lbl ->
                             val begin = byKey["holdOpen${lbl}Begin"]
                             val end = byKey["holdOpen${lbl}End"]
                             val days = byKey["holdOpen${lbl}Days"]
@@ -805,7 +835,6 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.Apb -> {
-                        val byKey = sectionFields.associateBy { it.key }
                         val modeField = byKey["apbMode"]
                         val apbOn = modeField != null && current(modeField) != "Off"
                         val resyncAllField = byKey["apbResyncAll"]
@@ -824,7 +853,18 @@ fun BoardSettingsScreen(
                             }
                         }
 
-                        items(visibleApbFields, key = { it.key }) { setting ->
+                        items(
+                            visibleApbFields,
+                            key = { it.key },
+                            contentType = {
+                                when (it.key) {
+                                    "apbMode", "apbRelaysIn", "apbRelaysOut", "apbCounterEvery" -> "apb_chips"
+                                    "apbResyncAll" -> "apb_switch"
+                                    "apbScheduleEnabled" -> "apb_schedule"
+                                    else -> "apb_text"
+                                }
+                            },
+                        ) { setting ->
                             val cur = current(setting)
                             val dirty = setting.key in edits
                             val pending = setting.value != setting.gate
@@ -961,7 +1001,7 @@ fun BoardSettingsScreen(
 
                     BoardSection.Display, BoardSection.System -> {
                         if (section == BoardSection.Display) {
-                            item(key = "display-mode") {
+                            item(key = "display-mode", contentType = "display_mode") {
                                 BubbleCard {
                                     Text("LCD Message Layout", style = MaterialTheme.typography.titleSmall)
                                     val noBorder = BorderStroke(0.dp, Color.Transparent)
@@ -995,7 +1035,11 @@ fun BoardSettingsScreen(
                                 }
                             }
                         }
-                        items(sectionFields, key = { it.key }) { setting ->
+                        items(
+                            sectionFields,
+                            key = { it.key },
+                            contentType = { if (it.editable) "setting_editable" else "setting_readonly" },
+                        ) { setting ->
                             val cur = current(setting)
                             val dirty = setting.key in edits
                             val pending = setting.value != setting.gate

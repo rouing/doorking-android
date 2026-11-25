@@ -1,7 +1,7 @@
 package com.doorking.gate.core.media
 
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Trace
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -36,17 +37,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.doorking.gate.core.network.CameraChannelDto
 import com.doorking.gate.core.ui.components.ErrorBanner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,9 +61,12 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
+private const val MAX_MJPEG_FRAME_BYTES = 4 * 1024 * 1024
+private const val MAX_DECODE_DIMENSION_PX = 1280
+
 /**
  * Live MJPEG camera viewer backed by `GET /api/gates/{phone}/cameras/live/{channel}`.
- * Streams authenticated multipart JPEG frames off the main thread and cleanly aborts the HTTP call on close.
+ * Streams authenticated multipart JPEG frames off the main thread while `STARTED` and cleanly aborts on stop/close.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -68,60 +78,67 @@ fun LiveCameraDialog(
     onDismiss: () -> Unit,
 ) {
     if (channels.isEmpty()) {
-        onDismiss()
+        SideEffect { onDismiss() }
         return
     }
     var selectedChannel by remember { mutableIntStateOf(channels.first().channel) }
     var highQuality by remember { mutableStateOf(false) }
     var retryNonce by remember { mutableIntStateOf(0) }
-    var currentFrame by remember { mutableStateOf<Bitmap?>(null) }
+    var currentFrame by remember { mutableStateOf<ImageBitmap?>(null) }
     var connecting by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val streamingClient = remember(okHttpClient) {
+        okHttpClient.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+    }
     val base = serverUrl.trimEnd('/')
     val streamUrl = "$base/api/gates/$gatePhone/cameras/live/$selectedChannel?quality=${if (highQuality) "high" else "low"}"
 
-    LaunchedEffect(streamUrl, retryNonce) {
-        connecting = true
-        error = null
-        val streamingClient = okHttpClient.newBuilder()
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .build()
-        val call = streamingClient.newCall(Request.Builder().url(streamUrl).get().build())
-        try {
-            withContext(Dispatchers.IO) {
-                val response = call.execute()
-                response.use { res ->
-                    if (!res.isSuccessful) {
-                        error = "Camera stream failed (HTTP ${res.code})"
-                        connecting = false
-                        return@withContext
-                    }
-                    val stream = res.body?.byteStream() ?: run {
-                        error = "Empty camera stream"
-                        connecting = false
-                        return@withContext
-                    }
-                    readMjpegFrames(stream) { jpegBytes ->
-                        val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-                        if (bmp != null) {
-                            currentFrame = bmp
+    LaunchedEffect(streamUrl, retryNonce, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            connecting = true
+            error = null
+            val call = streamingClient.newCall(Request.Builder().url(streamUrl).get().build())
+            val cancelHandle = currentCoroutineContext().job.invokeOnCompletion { call.cancel() }
+            try {
+                withContext(Dispatchers.IO) {
+                    val response = call.execute()
+                    response.use { res ->
+                        if (!res.isSuccessful) {
+                            error = "Camera stream failed (HTTP ${res.code})"
                             connecting = false
+                            return@withContext
                         }
-                        isActive
+                        val stream = res.body?.byteStream() ?: run {
+                            error = "Empty camera stream"
+                            connecting = false
+                            return@withContext
+                        }
+                        readMjpegFrames(stream) { bytes, length ->
+                            val imageBitmap = decodeDownsampledImageBitmap(bytes, length)
+                            if (imageBitmap != null) {
+                                currentFrame = imageBitmap
+                                connecting = false
+                            }
+                            isActive
+                        }
                     }
                 }
+            } catch (ce: CancellationException) {
+                call.cancel()
+                throw ce
+            } catch (t: Throwable) {
+                if (isActive) {
+                    error = t.message ?: "Live camera connection ended"
+                    connecting = false
+                }
+            } finally {
+                cancelHandle.dispose()
+                call.cancel()
             }
-        } catch (ce: CancellationException) {
-            call.cancel()
-            throw ce
-        } catch (t: Throwable) {
-            if (isActive) {
-                error = t.message ?: "Live camera connection ended"
-                connecting = false
-            }
-        } finally {
-            call.cancel()
         }
     }
 
@@ -173,15 +190,10 @@ fun LiveCameraDialog(
                         .background(Color.Black),
                     contentAlignment = Alignment.Center,
                 ) {
-                    val bmp = currentFrame
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = "Live gate camera feed",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                    LiveFrameImage(
+                        frameProvider = { currentFrame },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     if (connecting) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -245,12 +257,61 @@ fun LiveCameraDialog(
     }
 }
 
+@Composable
+private fun LiveFrameImage(
+    frameProvider: () -> ImageBitmap?,
+    modifier: Modifier = Modifier,
+) {
+    val frame = frameProvider()
+    if (frame != null) {
+        Image(
+            bitmap = frame,
+            contentDescription = "Live gate camera feed",
+            contentScale = ContentScale.Fit,
+            modifier = modifier,
+        )
+    }
+}
+
+private class AccessibleByteArrayOutputStream(initialSize: Int) : ByteArrayOutputStream(initialSize) {
+    val backingBuffer: ByteArray get() = buf
+    val length: Int get() = count
+}
+
+private fun decodeDownsampledImageBitmap(
+    bytes: ByteArray,
+    length: Int,
+    maxDimensionPx: Int = MAX_DECODE_DIMENSION_PX,
+): ImageBitmap? {
+    Trace.beginSection("Doorking:MjpegDecode")
+    return try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, length, bounds)
+        val srcWidth = bounds.outWidth
+        val srcHeight = bounds.outHeight
+        if (srcWidth <= 0 || srcHeight <= 0) return null
+
+        var sampleSize = 1
+        while ((srcWidth / sampleSize) > maxDimensionPx || (srcHeight / sampleSize) > maxDimensionPx) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        }
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, length, decodeOpts) ?: return null
+        bmp.asImageBitmap()
+    } finally {
+        Trace.endSection()
+    }
+}
+
 /**
- * Extracts raw JPEG frames (`0xFF 0xD8` .. `0xFF 0xD9`) from an MJPEG stream.
+ * Extracts raw JPEG frames (`0xFF 0xD8` .. `0xFF 0xD9`) from an MJPEG stream into a bounded buffer
+ * without per-frame `toByteArray()` copies.
  */
-private fun readMjpegFrames(input: InputStream, onFrame: (ByteArray) -> Boolean) {
+private fun readMjpegFrames(input: InputStream, onFrame: (ByteArray, Int) -> Boolean) {
     val buf = ByteArray(8192)
-    val frame = ByteArrayOutputStream(65536)
+    val frame = AccessibleByteArrayOutputStream(65536)
     var inFrame = false
     var prev = -1
 
@@ -267,10 +328,15 @@ private fun readMjpegFrames(input: InputStream, onFrame: (ByteArray) -> Boolean)
                     inFrame = true
                 }
             } else {
-                frame.write(b)
-                if (prev == 0xFF && b == 0xD9) {
+                if (frame.length >= MAX_MJPEG_FRAME_BYTES) {
+                    frame.reset()
                     inFrame = false
-                    if (!onFrame(frame.toByteArray())) return
+                } else {
+                    frame.write(b)
+                    if (prev == 0xFF && b == 0xD9) {
+                        inFrame = false
+                        if (!onFrame(frame.backingBuffer, frame.length)) return
+                    }
                 }
             }
             prev = b

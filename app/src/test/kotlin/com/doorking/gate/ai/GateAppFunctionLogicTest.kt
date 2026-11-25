@@ -128,4 +128,56 @@ class GateAppFunctionLogicTest {
             GateAppFunctionLogic.loadReadyTiles(storage, api)
         }
     }
+
+    @Test
+    fun openRelayRespectsBiometricAppLockWithoutBuzzing() = runBlocking {
+        var buzzCalled = false
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/session" -> MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":true,"user":"alice","gate":{"phoneNumber":"2145550100","siteName":"Oakridge Condos","role":"resident"}}""")
+                "/api/gates" -> MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"gates":[{"phoneNumber":"2145550100","siteName":"Oakridge Condos","role":"resident"}]}""")
+                "/api/portal/gates/2145550100/me" -> MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"gate":{"phoneNumber":"2145550100","siteName":"Oakridge Condos"},"unit":{"directoryCode":"101","name":"Alice"},"portal":{"enabled":true,"buzzEnabled":true,"buzzRelayLabels":[{"relay":0,"name":"Entry"}]},"reroll":{"remainingToday":1}}""")
+                "/api/portal/gates/2145550100/status" -> MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"available":true,"cooldownSeconds":0}""")
+                "/api/portal/gates/2145550100/buzz" -> {
+                    buzzCalled = true
+                    MockResponse().setResponseCode(200)
+                        .addHeader("Content-Type", "application/json")
+                        .setBody("""{"ok":true,"alreadyOpen":false}""")
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(
+            initialServerUrl = baseUrl,
+            initialToken = "dks_${"9".repeat(64)}",
+            initialBiometricLockEnabled = true,
+        )
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        var intentRequested = false
+        val result = GateAppFunctionLogic.openRelay(
+            sessionStorage = storage,
+            api = api,
+            relayName = "Entry",
+            gateName = "Oakridge",
+            openAppIntentProvider = {
+                intentRequested = true
+                null
+            },
+        )
+        assertFalse(result.opened)
+        assertFalse(buzzCalled)
+        assertTrue(intentRequested)
+        assertEquals("Oakridge Condos", result.gateName)
+        assertEquals("Entry", result.relayName)
+    }
 }

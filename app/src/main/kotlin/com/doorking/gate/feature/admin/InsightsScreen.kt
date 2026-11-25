@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -52,7 +52,19 @@ import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+
+private fun <T> List<T>.withUniqueKeys(baseKey: (T) -> String): List<Pair<String, T>> {
+    val seen = HashMap<String, Int>(size)
+    return map { item ->
+        val base = baseKey(item)
+        val count = (seen[base] ?: 0) + 1
+        seen[base] = count
+        val key = if (count == 1) base else "$base#$count"
+        key to item
+    }
+}
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -68,14 +80,17 @@ fun InsightsScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun load(targetDays: Int, initial: Boolean = false) {
+    suspend fun load(targetDays: Int, initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         error = null
-        scope.launch {
-            runCatching { api.getAudit(gatePhone, targetDays) }
-                .onSuccess { audit = it; loading = false; refreshing = false }
-                .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
-        }
+        runCatching { api.getAudit(gatePhone, targetDays) }
+            .onSuccess { audit = it; loading = false; refreshing = false }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     LaunchedEffect(gatePhone, days) { load(days, initial = audit == null) }
@@ -86,6 +101,15 @@ fun InsightsScreen(
     }
 
     val data = audit
+    val dormantItems = remember(data?.dormant) {
+        data?.dormant.orEmpty().withUniqueKeys { "d-${it.directoryCode}" }
+    }
+    val unknownCardItems = remember(data?.unknownCards) {
+        data?.unknownCards.orEmpty().withUniqueKeys { "u-${it.cardNumber}" }
+    }
+    val entryCodeItems = remember(data?.entryCodes) {
+        data?.entryCodes.orEmpty().withUniqueKeys { "c-${it.directoryCode}-${it.entryCode}" }
+    }
     val tabs = listOf(
         "Dormant (${data?.dormant?.size ?: 0})",
         "Unknown (${data?.unknownCards?.size ?: 0})",
@@ -94,7 +118,7 @@ fun InsightsScreen(
 
     PullToRefreshBox(
         isRefreshing = refreshing,
-        onRefresh = { load(days, initial = false) },
+        onRefresh = { scope.launch { load(days, initial = false) } },
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -103,7 +127,7 @@ fun InsightsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // Borderless tonal lookback selector
-            item(key = "period") {
+            item(key = "period", contentType = "period_selector") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -130,11 +154,13 @@ fun InsightsScreen(
             }
 
             if (error != null) {
-                item(key = "err") { ErrorBanner(error!!, onRetry = { load(days, initial = false) }) }
+                item(key = "err", contentType = "error") {
+                    ErrorBanner(error!!, onRetry = { scope.launch { load(days, initial = false) } })
+                }
             }
 
             if (data != null) {
-                item(key = "kpis") {
+                item(key = "kpis", contentType = "kpis") {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             KpiTile("Total Events", "${data.traffic.totalEvents}", Modifier.weight(1f))
@@ -148,7 +174,7 @@ fun InsightsScreen(
                 }
 
                 if (data.traffic.byHour.size == 24) {
-                    item(key = "hourly") {
+                    item(key = "hourly", contentType = "hourly_chart") {
                         val peakCount = data.traffic.byHour.maxOrNull() ?: 0
                         val peakHour = data.traffic.byHour.indexOf(peakCount).coerceAtLeast(0)
                         SectionCard(title = "Activity by Hour (0–23)", tonal = true) {
@@ -192,7 +218,7 @@ fun InsightsScreen(
                 }
 
                 // Borderless Material 3 segmented switcher
-                item(key = "seg") {
+                item(key = "seg", contentType = "segment_tabs") {
                     val noBorder = BorderStroke(0.dp, Color.Transparent)
                     SingleChoiceSegmentedButtonRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -217,12 +243,12 @@ fun InsightsScreen(
 
                 when (tabIndex) {
                     0 -> {
-                        if (data.dormant.isEmpty()) {
-                            item(key = "dormant-empty") {
+                        if (dormantItems.isEmpty()) {
+                            item(key = "dormant-empty", contentType = "empty") {
                                 BubbleCard { Text("No dormant credentials in the last $days days.") }
                             }
                         } else {
-                            itemsIndexed(data.dormant, key = { idx, it -> "d-$idx-${it.directoryCode}" }) { _, item ->
+                            items(dormantItems, key = { it.first }, contentType = { "dormant_entry" }) { (_, item) ->
                                 BubbleCard {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -243,12 +269,12 @@ fun InsightsScreen(
                     }
 
                     1 -> {
-                        if (data.unknownCards.isEmpty()) {
-                            item(key = "unk-empty") {
+                        if (unknownCardItems.isEmpty()) {
+                            item(key = "unk-empty", contentType = "empty") {
                                 BubbleCard { Text("No unknown card activity in the last $days days.") }
                             }
                         } else {
-                            itemsIndexed(data.unknownCards, key = { idx, it -> "u-$idx-${it.cardNumber}" }) { _, item ->
+                            items(unknownCardItems, key = { it.first }, contentType = { "unknown_card" }) { (_, item) ->
                                 BubbleCard {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -269,12 +295,12 @@ fun InsightsScreen(
                     }
 
                     else -> {
-                        if (data.entryCodes.isEmpty()) {
-                            item(key = "codes-empty") {
+                        if (entryCodeItems.isEmpty()) {
+                            item(key = "codes-empty", contentType = "empty") {
                                 BubbleCard { Text("No entry code usage recorded in the last $days days.") }
                             }
                         } else {
-                            itemsIndexed(data.entryCodes, key = { idx, it -> "c-$idx-${it.directoryCode}-${it.entryCode}" }) { _, item ->
+                            items(entryCodeItems, key = { it.first }, contentType = { "entry_code" }) { (_, item) ->
                                 BubbleCard {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),

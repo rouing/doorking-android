@@ -523,10 +523,6 @@ fun LiveRelaysSheetContent(
     val semantic = LocalDoorkingColors.current
     val haptic = LocalHapticFeedback.current
 
-    LaunchedEffect(Unit) {
-        onRefresh()
-    }
-
     Column(
         modifier = Modifier
             .fillMaxWidth()

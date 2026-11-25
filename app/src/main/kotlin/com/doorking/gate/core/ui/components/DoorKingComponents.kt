@@ -64,6 +64,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -770,6 +771,10 @@ fun PasswordOutlinedField(
     val state = rememberTextFieldState(initialText = value)
     var localVisible by remember { mutableStateOf(false) }
     val isVisible = visible ?: localVisible
+    val latestValue by rememberUpdatedState(value)
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
+    val latestDigitsOnly by rememberUpdatedState(digitsOnly)
+    val latestMaxLength by rememberUpdatedState(maxLength)
 
     LaunchedEffect(value) {
         if (state.text.toString() != value) {
@@ -778,13 +783,14 @@ fun PasswordOutlinedField(
     }
     LaunchedEffect(state) {
         snapshotFlow { state.text.toString() }.collect { current ->
-            val filtered = if (digitsOnly) current.filter(Char::isDigit) else current
-            val capped = if (maxLength != null) filtered.take(maxLength) else filtered
+            val filtered = if (latestDigitsOnly) current.filter(Char::isDigit) else current
+            val maxLen = latestMaxLength
+            val capped = if (maxLen != null) filtered.take(maxLen) else filtered
             if (capped != current) {
                 state.setTextAndPlaceCursorAtEnd(capped)
             }
-            if (capped != value) {
-                onValueChange(capped)
+            if (capped != latestValue) {
+                latestOnValueChange(capped)
             }
         }
     }

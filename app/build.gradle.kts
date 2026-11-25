@@ -36,8 +36,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 28
-    versionName = "1.0.27"
+    versionCode = 29
+    versionName = "1.0.28"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -61,13 +61,18 @@ android {
 
   buildTypes {
     release {
-      isMinifyEnabled = true
-      isShrinkResources = true
-      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      optimization {
+        enable = true
+      }
       signingConfigs.findByName("release")?.let { signingConfig = it }
     }
     debug {
       isMinifyEnabled = false
+    }
+    create("benchmark") {
+      initWith(getByName("release"))
+      signingConfig = signingConfigs.getByName("debug")
+      matchingFallbacks += listOf("release")
     }
   }
 
@@ -161,6 +166,7 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.activity.compose)
+  implementation(libs.androidx.profileinstaller)
   implementation(libs.kotlinx.coroutines.android)
 
   // Compose Material 3

@@ -1,0 +1,39 @@
+# Baseline Profile rules for DoorKing Gate Manager (com.doorking.gate)
+# Pre-compiles startup, authentication, navigation, Staff Directory/Transactions,
+# Resident Portal, and Glance widget code paths via ART + androidx.profileinstaller.
+
+# Startup & application bootstrap
+Lcom/doorking/gate/DoorkingApp;
+HSPLcom/doorking/gate/DoorkingApp;->**(**)**
+Lcom/doorking/gate/AppContainer;
+HSPLcom/doorking/gate/AppContainer;->**(**)**
+Lcom/doorking/gate/MainActivity;
+HSPLcom/doorking/gate/MainActivity;->**(**)**
+
+# Core auth, networking, theming & UI components
+Lcom/doorking/gate/core/auth/**;
+HSPLcom/doorking/gate/core/auth/**->**(**)**
+Lcom/doorking/gate/core/network/**;
+HSPLcom/doorking/gate/core/network/**->**(**)**
+Lcom/doorking/gate/core/ui/theme/**;
+HSPLcom/doorking/gate/core/ui/theme/**->**(**)**
+Lcom/doorking/gate/core/ui/components/**;
+HSPLcom/doorking/gate/core/ui/components/**->**(**)**
+
+# Navigation
+Lcom/doorking/gate/navigation/**;
+HSPLcom/doorking/gate/navigation/**->**(**)**
+
+# Primary user flows (Auth, Gate Picker, Resident Portal, Staff Directory & Transactions)
+Lcom/doorking/gate/feature/auth/**;
+HSPLcom/doorking/gate/feature/auth/**->**(**)**
+Lcom/doorking/gate/feature/gates/**;
+HSPLcom/doorking/gate/feature/gates/**->**(**)**
+Lcom/doorking/gate/feature/portal/**;
+HSPLcom/doorking/gate/feature/portal/**->**(**)**
+Lcom/doorking/gate/feature/staff/**;
+HSPLcom/doorking/gate/feature/staff/**->**(**)**
+
+# Glance home-screen widgets
+Lcom/doorking/gate/widget/**;
+HSPLcom/doorking/gate/widget/**->**(**)**

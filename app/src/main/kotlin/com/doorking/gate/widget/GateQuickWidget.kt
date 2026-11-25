@@ -1,7 +1,11 @@
 package com.doorking.gate.widget
 
+import android.appwidget.AppWidgetManager
 import android.content.Context
+import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.datastore.preferences.core.Preferences
@@ -21,6 +25,7 @@ import androidx.glance.action.actionParametersOf
 import androidx.glance.action.actionStartActivity
 import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
+import androidx.glance.appwidget.PreviewSizeMode
 import androidx.glance.appwidget.SizeMode
 import androidx.glance.appwidget.action.actionRunCallback
 import androidx.glance.appwidget.appWidgetBackground
@@ -56,15 +61,38 @@ class GateQuickWidget : GlanceAppWidget() {
 
     override val stateDefinition: GlanceStateDefinition<*> = PreferencesGlanceStateDefinition
     override val sizeMode: SizeMode = SizeMode.Exact
+    override val previewSizeMode: PreviewSizeMode = SizeMode.Responsive(
+        setOf(DpSize(180.dp, 110.dp), DpSize(250.dp, 110.dp)),
+    )
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         provideContent {
             val prefs = currentState<Preferences>()
-            val snapshot = snapshotFromPrefs(prefs)
+            val snapshot = remember(prefs) { snapshotFromPrefs(prefs) }
             GlanceTheme {
                 GateWidgetContent(snapshot = snapshot)
             }
         }
+    }
+
+    override suspend fun providePreview(context: Context, widgetCategory: Int) {
+        provideContent {
+            GlanceTheme {
+                GateWidgetContent(snapshot = previewSnapshot(), isPreview = true)
+            }
+        }
+    }
+
+    override fun onCompositionError(
+        context: Context,
+        glanceId: GlanceId,
+        appWidgetId: Int,
+        throwable: Throwable,
+    ) {
+        val fallback = RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply {
+            setTextViewText(android.R.id.text1, "Tap to open Doorking Gate")
+        }
+        AppWidgetManager.getInstance(context).updateAppWidget(appWidgetId, fallback)
     }
 
     companion object {
@@ -81,10 +109,41 @@ class GateQuickWidget : GlanceAppWidget() {
         val KEY_UNIT_CODE = stringPreferencesKey("unit_code")
         val KEY_BUSY = booleanPreferencesKey("busy")
 
+        @Volatile
+        private var cachedRelays: Pair<String, List<WidgetRelayEntry>>? = null
+
+        internal fun decodeRelays(raw: String?): List<WidgetRelayEntry> {
+            if (raw.isNullOrBlank()) return emptyList()
+            cachedRelays?.let { (cachedRaw, entries) ->
+                if (cachedRaw == raw) return entries
+            }
+            val decoded = runCatching {
+                ApiClientFactory.json.decodeFromString<List<WidgetRelayEntry>>(raw)
+            }.getOrNull().orEmpty()
+            cachedRelays = raw to decoded
+            return decoded
+        }
+
+        internal fun previewSnapshot(): GateWidgetSnapshot = GateWidgetSnapshot(
+            signedIn = true,
+            gatePhone = "",
+            gateName = "Gate",
+            subtitle = "Unit 101 · Ready",
+            statusText = "Ready",
+            statusTone = GateWidgetSnapshot.TONE_SUCCESS,
+            canBuzz = true,
+            buzzRelay = 0,
+            buzzRelayName = "Main Gate",
+            relays = listOf(
+                WidgetRelayEntry(relay = 0, name = "Main Gate"),
+                WidgetRelayEntry(relay = 1, name = "Walk Gate"),
+            ),
+            unitCode = "101",
+            busy = false,
+        )
+
         fun snapshotFromPrefs(prefs: Preferences): GateWidgetSnapshot {
-            val decodedRelays = prefs[KEY_RELAYS_JSON]?.takeIf { it.isNotBlank() }?.let { raw ->
-                runCatching { ApiClientFactory.json.decodeFromString<List<WidgetRelayEntry>>(raw) }.getOrNull()
-            }.orEmpty()
+            val decodedRelays = decodeRelays(prefs[KEY_RELAYS_JSON])
             return GateWidgetSnapshot(
                 signedIn = prefs[KEY_SIGNED_IN] ?: false,
                 gatePhone = prefs[KEY_GATE_PHONE].orEmpty(),
@@ -103,14 +162,66 @@ class GateQuickWidget : GlanceAppWidget() {
     }
 }
 
+internal enum class TinyTileStyle {
+    BUSY,
+    ACTIVE,
+    MUTED,
+}
+
+internal data class TinyTileState(
+    val label: String,
+    val contentDescription: String,
+    val style: TinyTileStyle,
+)
+
+internal fun resolveTinyTileState(snapshot: GateWidgetSnapshot): TinyTileState = when {
+    snapshot.busy -> TinyTileState(
+        label = "Opening…",
+        contentDescription = "Opening ${snapshot.buzzRelayName}",
+        style = TinyTileStyle.BUSY,
+    )
+    !snapshot.signedIn -> TinyTileState(
+        label = "Sign in",
+        contentDescription = "Sign in to Doorking Gate",
+        style = TinyTileStyle.MUTED,
+    )
+    !snapshot.canBuzz -> {
+        val status = snapshot.statusText.ifBlank { "Gate" }
+        TinyTileState(
+            label = status,
+            contentDescription = status,
+            style = TinyTileStyle.MUTED,
+        )
+    }
+    else -> TinyTileState(
+        label = snapshot.buzzRelayName,
+        contentDescription = "Open ${snapshot.buzzRelayName}",
+        style = TinyTileStyle.ACTIVE,
+    )
+}
+
 @Composable
-private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
+private fun GateWidgetContent(
+    snapshot: GateWidgetSnapshot,
+    isPreview: Boolean = false,
+) {
     val size = LocalSize.current
-    val tiny = size.width < 120.dp || size.height < 90.dp
+    val isTiny = size.width < 120.dp || size.height < 90.dp
     val compact = size.height < 120.dp
 
-    if (tiny) {
-        val action = if (snapshot.signedIn && snapshot.canBuzz && snapshot.gatePhone.isNotBlank() && !snapshot.busy) {
+    if (isTiny) {
+        val tinyState = resolveTinyTileState(snapshot)
+        val tileBg = when (tinyState.style) {
+            TinyTileStyle.BUSY -> GlanceTheme.colors.tertiaryContainer
+            TinyTileStyle.ACTIVE -> GlanceTheme.colors.primaryContainer
+            TinyTileStyle.MUTED -> GlanceTheme.colors.surfaceVariant
+        }
+        val tileFg = when (tinyState.style) {
+            TinyTileStyle.BUSY -> GlanceTheme.colors.onTertiaryContainer
+            TinyTileStyle.ACTIVE -> GlanceTheme.colors.onPrimaryContainer
+            TinyTileStyle.MUTED -> GlanceTheme.colors.onSurfaceVariant
+        }
+        val action = if (!isPreview && snapshot.signedIn && snapshot.canBuzz && snapshot.gatePhone.isNotBlank() && !snapshot.busy) {
             actionRunCallback<BuzzGateWidgetAction>(
                 actionParametersOf(
                     BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
@@ -126,7 +237,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .appWidgetBackground()
-                .background(if (snapshot.busy) GlanceTheme.colors.tertiaryContainer else GlanceTheme.colors.primaryContainer)
+                .background(tileBg)
                 .clickable(action)
                 .padding(6.dp),
             verticalAlignment = Alignment.Vertical.CenterVertically,
@@ -134,18 +245,16 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
         ) {
             Image(
                 provider = ImageProvider(R.drawable.ic_widget_lock),
-                contentDescription = "Open ${snapshot.buzzRelayName}",
-                colorFilter = ColorFilter.tint(
-                    if (snapshot.busy) GlanceTheme.colors.onTertiaryContainer else GlanceTheme.colors.onPrimaryContainer,
-                ),
+                contentDescription = tinyState.contentDescription,
+                colorFilter = ColorFilter.tint(tileFg),
                 modifier = GlanceModifier.size(22.dp),
             )
             Spacer(GlanceModifier.height(3.dp))
             Text(
-                text = if (snapshot.busy) "Opening…" else snapshot.buzzRelayName,
+                text = tinyState.label,
                 maxLines = 1,
                 style = TextStyle(
-                    color = if (snapshot.busy) GlanceTheme.colors.onTertiaryContainer else GlanceTheme.colors.onPrimaryContainer,
+                    color = tileFg,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                 ),
@@ -244,7 +353,9 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                 modifier = GlanceModifier
                     .size(48.dp)
                     .cornerRadius(24.dp)
-                    .clickable(actionRunCallback<RefreshGateWidgetAction>()),
+                    .clickable(
+                        if (isPreview) actionStartActivity<MainActivity>() else actionRunCallback<RefreshGateWidgetAction>(),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Image(
@@ -266,7 +377,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                     modifier = GlanceModifier.fillMaxWidth(),
                 )
             }
-            snapshot.canBuzz && snapshot.gatePhone.isNotBlank() -> {
+            snapshot.canBuzz && (isPreview || snapshot.gatePhone.isNotBlank()) -> {
                 val visibleRelays = snapshot.relays
                     .ifEmpty { listOf(WidgetRelayEntry(snapshot.buzzRelay, snapshot.buzzRelayName)) }
                     .take(6)
@@ -278,6 +389,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                             entry = entry,
                             label = if (snapshot.busy) "Opening ${entry.name}…" else "Open ${entry.name}",
                             modifier = GlanceModifier.fillMaxWidth(),
+                            isPreview = isPreview,
                         )
                     }
                     visibleRelays.size in 2..3 && size.width < 220.dp -> {
@@ -289,6 +401,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                                     entry = entry,
                                     label = if (snapshot.busy) "Opening…" else entry.name,
                                     modifier = GlanceModifier.fillMaxWidth(),
+                                    isPreview = isPreview,
                                 )
                             }
                         }
@@ -302,6 +415,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                                     entry = entry,
                                     label = if (snapshot.busy) "Opening…" else entry.name,
                                     modifier = GlanceModifier.defaultWeight(),
+                                    isPreview = isPreview,
                                 )
                             }
                         }
@@ -319,6 +433,7 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                                             entry = entry,
                                             label = if (snapshot.busy) "Opening…" else entry.name,
                                             modifier = GlanceModifier.defaultWeight(),
+                                            isPreview = isPreview,
                                         )
                                     }
                                 }
@@ -344,7 +459,20 @@ private fun RelayBuzzButton(
     entry: WidgetRelayEntry,
     label: String,
     modifier: GlanceModifier,
+    isPreview: Boolean = false,
 ) {
+    val onClick = if (isPreview) {
+        actionStartActivity<MainActivity>()
+    } else {
+        actionRunCallback<BuzzGateWidgetAction>(
+            actionParametersOf(
+                BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
+                BuzzGateWidgetAction.KEY_RELAY to entry.relay,
+                BuzzGateWidgetAction.KEY_RELAY_NAME to entry.name,
+                BuzzGateWidgetAction.KEY_UNIT_CODE to snapshot.unitCode.orEmpty(),
+            ),
+        )
+    }
     Button(
         text = label,
         enabled = !snapshot.busy,
@@ -353,14 +481,7 @@ private fun RelayBuzzButton(
             backgroundColor = GlanceTheme.colors.primary,
             contentColor = GlanceTheme.colors.onPrimary,
         ),
-        onClick = actionRunCallback<BuzzGateWidgetAction>(
-            actionParametersOf(
-                BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
-                BuzzGateWidgetAction.KEY_RELAY to entry.relay,
-                BuzzGateWidgetAction.KEY_RELAY_NAME to entry.name,
-                BuzzGateWidgetAction.KEY_UNIT_CODE to snapshot.unitCode.orEmpty(),
-            ),
-        ),
+        onClick = onClick,
         modifier = modifier,
     )
 }

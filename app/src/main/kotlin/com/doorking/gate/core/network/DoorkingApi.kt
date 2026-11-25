@@ -6,10 +6,13 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.Header
+import retrofit2.http.Headers
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
+import retrofit2.http.Url
 
 /**
  * Retrofit contract mirroring the `webapp/` Fastify REST API (`docs/openapi.json` + `web/routes/`).
@@ -101,6 +104,13 @@ interface DoorkingApi {
 
     @POST("api/invite/check")
     suspend fun checkInvite(@Body body: InviteCheckRequest): Response<InviteCheckResponse>
+
+    @POST
+    @Headers("X-Doorking-Explicit-Url: 1")
+    suspend fun checkInviteAtUrl(
+        @Url url: String,
+        @Body body: InviteCheckRequest,
+    ): Response<InviteCheckResponse>
 
     @POST("api/invite")
     suspend fun acceptInvite(@Body body: AcceptInviteRequest): Response<LoginResponse>
@@ -464,6 +474,7 @@ interface DoorkingApi {
     suspend fun portalBuzz(
         @Path("phone") phone: String,
         @Body body: BuzzRequest,
+        @Header("X-Doorking-No-Interactive-StepUp") noInteractiveStepUp: String? = null,
     ): Response<BuzzResponse>
 
     @POST("api/portal/gates/{phone}/reroll-code")

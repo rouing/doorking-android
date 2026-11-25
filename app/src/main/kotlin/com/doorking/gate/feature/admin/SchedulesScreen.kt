@@ -30,7 +30,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,7 +37,6 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,8 +55,10 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.TimePickerField
 import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
+private val HHMM_REGEX = Regex("^\\d{2}:\\d{2}$")
 private val DAY_LABELS = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 private val ACTION_OPTIONS = listOf(
     "send" to "Send changes",
@@ -84,14 +84,17 @@ fun SchedulesScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun load(initial: Boolean = false) {
+    suspend fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         error = null
-        scope.launch {
-            runCatching { api.getSchedules(gatePhone).schedules }
-                .onSuccess { schedules = it; loading = false; refreshing = false }
-                .onFailure { error = ApiClientFactory.parseErrorMessage(it); loading = false; refreshing = false }
-        }
+        runCatching { api.getSchedules(gatePhone).schedules }
+            .onSuccess { schedules = it; loading = false; refreshing = false }
+            .onFailure {
+                if (it is CancellationException) throw it
+                error = ApiClientFactory.parseErrorMessage(it)
+                loading = false
+                refreshing = false
+            }
     }
 
     LaunchedEffect(gatePhone) { load(initial = true) }
@@ -159,7 +162,7 @@ fun SchedulesScreen(
 
     PullToRefreshBox(
         isRefreshing = refreshing,
-        onRefresh = { load(initial = false) },
+        onRefresh = { scope.launch { load(initial = false) } },
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -167,10 +170,14 @@ fun SchedulesScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (error != null) item(key = "err") { ErrorBanner(error!!, onRetry = { load(initial = false) }) }
+            if (error != null) {
+                item(key = "err", contentType = "error") {
+                    ErrorBanner(error!!, onRetry = { scope.launch { load(initial = false) } })
+                }
+            }
 
             if (isAdmin) {
-                item(key = "add") {
+                item(key = "add", contentType = "add_button") {
                     Button(onClick = { showCreate = true }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Rounded.Add, contentDescription = null)
                         Text("Add scheduled transfer", modifier = Modifier.padding(start = 6.dp))
@@ -179,7 +186,7 @@ fun SchedulesScreen(
             }
 
             if (schedules.isEmpty()) {
-                item(key = "empty") {
+                item(key = "empty", contentType = "empty") {
                     BubbleCard {
                         Text("No scheduled transfers", style = MaterialTheme.typography.titleMedium)
                         Text(
@@ -190,7 +197,7 @@ fun SchedulesScreen(
                     }
                 }
             } else {
-                items(schedules, key = { it.id }) { sch ->
+                items(schedules, key = { it.id }, contentType = { "schedule_card" }) { sch ->
                     BubbleCard(onClick = if (isAdmin) { { editing = sch } } else null) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -252,8 +259,8 @@ private fun ScheduleEditorSheet(
 ) {
     var time by remember(existing) { mutableStateOf(existing?.time ?: "02:00") }
     var enabled by remember(existing) { mutableStateOf(existing?.enabled ?: true) }
-    val days = remember(existing) { mutableStateListOf<Int>().apply { addAll(existing?.days ?: listOf(0, 1, 2, 3, 4, 5, 6)) } }
-    val actions = remember(existing) { mutableStateListOf<String>().apply { addAll(existing?.actions ?: listOf("transactions")) } }
+    var days by remember(existing) { mutableStateOf((existing?.days ?: listOf(0, 1, 2, 3, 4, 5, 6)).toSet()) }
+    var actions by remember(existing) { mutableStateOf((existing?.actions ?: listOf("transactions")).toSet()) }
 
     Column(
         modifier = Modifier
@@ -289,7 +296,7 @@ private fun ScheduleEditorSheet(
                 val active = idx in days
                 FilterChip(
                     selected = active,
-                    onClick = { if (active) days.remove(idx) else days.add(idx) },
+                    onClick = { days = if (active) days - idx else days + idx },
                     label = { Text(label) },
                 )
             }
@@ -301,7 +308,7 @@ private fun ScheduleEditorSheet(
                 val active = id in actions
                 FilterChip(
                     selected = active,
-                    onClick = { if (active) actions.remove(id) else actions.add(id) },
+                    onClick = { actions = if (active) actions - id else actions + id },
                     label = { Text(label) },
                 )
             }
@@ -310,7 +317,7 @@ private fun ScheduleEditorSheet(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
             Button(
-                enabled = Regex("^\\d{2}:\\d{2}$").matches(time) && days.isNotEmpty() && actions.isNotEmpty(),
+                enabled = HHMM_REGEX.matches(time) && days.isNotEmpty() && actions.isNotEmpty(),
                 modifier = Modifier.weight(1.4f),
                 onClick = { onSave(ScheduleInputDto(days = days.sorted(), time = time, actions = actions.toList(), enabled = enabled)) },
             ) { Text("Save schedule") }

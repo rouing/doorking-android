@@ -2,11 +2,14 @@ package com.doorking.gate.core.network
 
 import app.cash.turbine.test
 import com.doorking.gate.fakes.FakeSessionStorage
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -83,6 +86,137 @@ class AuthInterceptorTest {
     }
 
     @Test
+    fun parallel401ResponsesDeduplicateSessionExpiredEvent() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val token = "dks_${"f".repeat(64)}"
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = token)
+        val events = AuthEventBus()
+        val client = ApiClientFactory.createOkHttp(storage, events)
+        val api = ApiClientFactory.createApi(client, baseUrl = "$baseUrl/")
+
+        repeat(3) {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(401)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"error":"Session expired"}"""),
+            )
+        }
+
+        events.events.test {
+            listOf(
+                async { runCatching { api.listGates() } },
+                async { runCatching { api.listGates() } },
+                async { runCatching { api.listGates() } },
+            ).awaitAll()
+            assertEquals(AuthEvent.SessionExpired, awaitItem())
+            expectNoEvents()
+        }
+        assertNull(storage.currentSessionToken())
+    }
+
+    @Test
+    fun unauthenticatedAllowlistEndpointsNeverReceiveBearerTokenEvenWhenSignedIn() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val token = "dks_${"1".repeat(64)}"
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = token)
+        val events = AuthEventBus()
+        val client = ApiClientFactory.createOkHttp(storage, events)
+        val api = ApiClientFactory.createApi(client, baseUrl = "$baseUrl/")
+
+        repeat(5) {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"ok":true,"url":"https://idp.example.com/auth","nativeVerifier":"v1","message":"sent","username":"alice"}"""),
+            )
+        }
+
+        api.checkInvite(InviteCheckRequest(token = "t".repeat(32)))
+        api.requestPasswordReset(PasswordResetRequest(identifier = "alice"))
+        api.startSso(SsoStartRequest(provider = "google", native = true))
+        api.getPasskeySignInOptions()
+        api.signIn(LoginRequest(user = "alice", password = "password12345"))
+
+        repeat(5) {
+            val req = server.takeRequest()
+            assertNull("Expected no Authorization header on ${req.method} ${req.path}", req.getHeader("Authorization"))
+        }
+    }
+
+    @Test
+    fun bearerTokenIsNotSentToDifferentOriginAndExplicitUrlIsNotRewritten() = runTest {
+        val primaryUrl = server.url("/").toString().trimEnd('/')
+        val otherServer = MockWebServer()
+        otherServer.start()
+        try {
+            val otherUrl = otherServer.url("/").toString().trimEnd('/')
+            val token = "dks_${"2".repeat(64)}"
+            val storage = FakeSessionStorage(initialServerUrl = primaryUrl, initialToken = token)
+            val events = AuthEventBus()
+            val client = ApiClientFactory.createOkHttp(storage, events)
+            val api = ApiClientFactory.createApi(client, baseUrl = "$primaryUrl/")
+
+            otherServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"username":"bob","isResident":true,"email":"bob@example.com"}"""),
+            )
+
+            val res = api.checkInviteAtUrl("$otherUrl/api/invite/check", InviteCheckRequest(token = "x".repeat(32)))
+            assertTrue(res.isSuccessful)
+            assertEquals("bob", res.body()?.username)
+
+            // Hit otherServer (not rewritten to primaryUrl), without Authorization or internal header.
+            assertEquals(0, server.requestCount)
+            val recorded = otherServer.takeRequest()
+            assertEquals("/api/invite/check", recorded.path)
+            assertNull(recorded.getHeader("Authorization"))
+            assertNull(recorded.getHeader(DoorkingAuthInterceptor.HEADER_EXPLICIT_URL))
+
+            // Switching serverUrl without clearing token must NOT send the old token to the new origin.
+            storage.setServerUrl(otherUrl)
+            otherServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"gates":[]}"""),
+            )
+            api.listGates()
+            val crossOriginReq = otherServer.takeRequest()
+            assertNull(crossOriginReq.getHeader("Authorization"))
+        } finally {
+            otherServer.shutdown()
+        }
+    }
+
+    @Test
+    fun legacyMigratedTokenWithoutSavedOriginUsesServerUrlOrigin() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val token = "dks_${"3".repeat(64)}"
+        val storage = FakeSessionStorage(
+            initialServerUrl = baseUrl,
+            initialToken = token,
+            initialTokenServerOrigin = null,
+        )
+        val events = AuthEventBus()
+        val client = ApiClientFactory.createOkHttp(storage, events)
+        val api = ApiClientFactory.createApi(client, baseUrl = "$baseUrl/")
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"gates":[]}"""),
+        )
+        api.listGates()
+        val req = server.takeRequest()
+        assertEquals("Bearer $token", req.getHeader("Authorization"))
+    }
+
+    @Test
     fun stepUp403InvokesCoordinatorAndRetriesOnce() = runTest {
         val baseUrl = server.url("/").toString().trimEnd('/')
         val token = "dks_${"c".repeat(64)}"
@@ -113,6 +247,36 @@ class AuthInterceptorTest {
         assertTrue(reply.ok)
         assertEquals(1, stepUpPrompted)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun noInteractiveStepUpHeaderSkipsCoordinatorAndIsStrippedUpstream() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val token = "dks_${"4".repeat(64)}"
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = token)
+        val events = AuthEventBus()
+        var stepUpPrompted = 0
+        val interceptor = DoorkingAuthInterceptor(storage, events, ApiClientFactory.json) {
+            stepUpPrompted += 1
+            true
+        }
+        val client = ApiClientFactory.createOkHttp(storage, events, authInterceptor = interceptor)
+        val api = ApiClientFactory.createApi(client, baseUrl = "$baseUrl/")
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"stepUp":true,"hasPasskey":true,"error":"Confirm with passkey"}"""),
+        )
+
+        val res = api.portalBuzz("2145550100", BuzzRequest(relay = 0), noInteractiveStepUp = "1")
+        assertFalse(res.isSuccessful)
+        assertEquals(403, res.code())
+        assertEquals(0, stepUpPrompted)
+        assertEquals(1, server.requestCount)
+        val req = server.takeRequest()
+        assertNull(req.getHeader(DoorkingAuthInterceptor.HEADER_NO_INTERACTIVE_STEP_UP))
     }
 
     @Test

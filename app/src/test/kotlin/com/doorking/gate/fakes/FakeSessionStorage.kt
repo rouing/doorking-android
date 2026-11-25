@@ -5,6 +5,7 @@ import com.doorking.gate.core.auth.SessionStorage
 import com.doorking.gate.core.auth.StoredAuthState
 import com.doorking.gate.core.auth.ThemeMode
 import com.doorking.gate.core.auth.normalizeServerUrl
+import com.doorking.gate.core.auth.serverOriginOf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,6 +14,9 @@ class FakeSessionStorage(
     initialServerUrl: String = DEFAULT_SERVER_URL,
     initialToken: String? = null,
     initialLastGate: String? = null,
+    initialTokenServerOrigin: String? = initialToken?.let { serverOriginOf(initialServerUrl) },
+    initialBiometricLockEnabled: Boolean = false,
+    initialCrashlyticsEnabled: Boolean = false,
 ) : SessionStorage {
 
     private val _state = MutableStateFlow(
@@ -20,7 +24,10 @@ class FakeSessionStorage(
             serverUrl = normalizeServerUrl(initialServerUrl),
             sessionToken = initialToken,
             lastGatePhone = initialLastGate,
+            biometricLockEnabled = initialBiometricLockEnabled,
             loaded = true,
+            tokenServerOrigin = initialTokenServerOrigin,
+            crashlyticsEnabled = initialCrashlyticsEnabled,
         ),
     )
     override val state: StateFlow<StoredAuthState> = _state.asStateFlow()
@@ -32,12 +39,17 @@ class FakeSessionStorage(
     override suspend fun awaitLoaded(): StoredAuthState = _state.value
 
     override suspend fun saveSessionToken(token: String) {
-        _state.value = _state.value.copy(sessionToken = token, loaded = true)
+        _state.value = _state.value.copy(
+            sessionToken = token,
+            tokenServerOrigin = serverOriginOf(_state.value.serverUrl),
+            loaded = true,
+        )
     }
 
     override suspend fun clearSessionToken() {
         _state.value = _state.value.copy(
             sessionToken = null,
+            tokenServerOrigin = null,
             lastGatePhone = null,
             biometricLockEnabled = false,
             biometricKeyId = null,
@@ -63,5 +75,9 @@ class FakeSessionStorage(
 
     override suspend fun setBiometricKeyId(keyId: String?) {
         _state.value = _state.value.copy(biometricKeyId = keyId?.ifBlank { null })
+    }
+
+    override suspend fun setCrashlyticsEnabled(enabled: Boolean) {
+        _state.value = _state.value.copy(crashlyticsEnabled = enabled)
     }
 }

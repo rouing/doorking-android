@@ -21,7 +21,9 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
@@ -150,5 +152,41 @@ class GatePickerViewModelTest {
     fun formatsTenDigitUsPhoneNumbers() {
         assertEquals("(214) 555-0100", formatUsPhone("2145550100"))
         assertEquals("555-0100", formatUsPhone("555-0100"))
+    }
+
+    @Test
+    fun addGatePollingBacksOffAndStopsAfterRepeatedErrors() = runBlocking {
+        val addPolls = AtomicInteger(0)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/gates" && request.method == "GET" -> jsonResponse(200, """{"gates":[]}""")
+                request.path == "/api/gates" && request.method == "POST" -> jsonResponse(202, """{"ok":true}""")
+                request.path == "/api/gate-add" -> {
+                    if (addPolls.getAndIncrement() == 0) {
+                        jsonResponse(200, """{"job":null}""")
+                    } else {
+                        jsonResponse(500, """{"error":"temporary outage"}""")
+                    }
+                }
+                else -> jsonResponse(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"7".repeat(64)}")
+        val api = ApiClientFactory.createApi(
+            ApiClientFactory.createOkHttp(storage, AuthEventBus()),
+            baseUrl = "$baseUrl/",
+        )
+
+        val vm = GatePickerViewModel(api, storage, pollIntervalMs = 15L)
+        withTimeout(5_000) { vm.uiState.first { !it.loading } }
+
+        vm.startAddGate("2145550200", "1234", "dksuser", "dkspass", GateConfigDto(siteName = "North Gate"))
+        val errored = withTimeout(5_000) { vm.uiState.first { it.addError != null } }
+        assertNotNull(errored.addError)
+        val countAtStop = addPolls.get()
+        delay(80L)
+        assertTrue(addPolls.get() <= countAtStop + 1)
     }
 }

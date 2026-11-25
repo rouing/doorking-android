@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -117,6 +117,22 @@ fun hidePortalHoldNoise(rows: List<TransactionRowDto>): List<TransactionRowDto> 
     return rows.filterIndexed { idx, _ -> idx !in hiddenIndices }
 }
 
+private data class KeyedTransaction(
+    val key: String,
+    val row: TransactionRowDto,
+)
+
+private fun keyTransactions(rows: List<TransactionRowDto>): List<KeyedTransaction> {
+    val seen = HashMap<String, Int>(rows.size)
+    return rows.map { row ->
+        val baseKey = "${row.source ?: "gate"}-${row.txKey ?: "${row.ts}-${row.raw}-${row.directoryCode}"}"
+        val occurrence = seen[baseKey] ?: 0
+        seen[baseKey] = occurrence + 1
+        val uniqueKey = if (occurrence == 0) baseKey else "$baseKey#$occurrence"
+        KeyedTransaction(key = uniqueKey, row = row)
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TransactionsTab(
@@ -131,13 +147,15 @@ fun TransactionsTab(
     var query by remember { mutableStateOf("") }
     var viewing by remember { mutableStateOf<Pair<TransactionRowDto, List<MediaItemEntry>>?>(null) }
 
-    val filtered = remember(state.transactions, query) {
-        val visible = hidePortalHoldNoise(state.transactions)
+    val visible = remember(state.transactions) {
+        keyTransactions(hidePortalHoldNoise(state.transactions))
+    }
+    val filtered = remember(visible, query) {
         val q = query.trim().lowercase()
         if (q.isEmpty()) {
             visible
         } else {
-            visible.filter { r ->
+            visible.filter { (_, r) ->
                 r.name.lowercase().contains(q) ||
                     r.eventType.lowercase().contains(q) ||
                     r.access.lowercase().contains(q) ||
@@ -169,10 +187,10 @@ fun TransactionsTab(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (state.error != null) {
-            item(key = "error") { ErrorBanner(state.error) }
+            item(key = "error", contentType = "error") { ErrorBanner(state.error) }
         }
 
-        item(key = "search") {
+        item(key = "search", contentType = "search") {
             SearchPillBar(
                 query = query,
                 onQueryChange = { query = it },
@@ -182,7 +200,7 @@ fun TransactionsTab(
 
         val activeRun = state.snapRun
         if (hasCamera && activeRun?.state == "running") {
-            item(key = "camera-run") {
+            item(key = "camera-run", contentType = "camera_run") {
                 val prog = activeRun.progress
                 val kindLabel = if (isVideoMode) "videos" else "snapshots"
                 val progressText = when {
@@ -230,7 +248,7 @@ fun TransactionsTab(
         }
 
         if (filtered.isEmpty()) {
-            item(key = "empty") {
+            item(key = "empty", contentType = "empty") {
                 BubbleCard {
                     Text("No transactions", style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -241,10 +259,11 @@ fun TransactionsTab(
                 }
             }
         } else {
-            itemsIndexed(
+            items(
                 items = filtered,
-                key = { index, it -> "$index-${it.source ?: "gate"}-${it.ts}-${it.raw}-${it.directoryCode}" },
-            ) { _, row ->
+                key = { it.key },
+                contentType = { "transaction" },
+            ) { (_, row) ->
                 val activeSnap = state.snapshots[row.minute]?.takeIf { it.status != "removed" }
                 val allFiles = activeSnap?.files.orEmpty()
                 val hasVideoFile = allFiles.any { it.endsWith(".mp4", ignoreCase = true) }
@@ -378,7 +397,7 @@ fun TransactionsTab(
             }
 
             if (state.txNextBefore != null) {
-                item(key = "more") {
+                item(key = "more", contentType = "load_more") {
                     FilledTonalButton(
                         onClick = onLoadOlder,
                         enabled = !state.loadingOlderTx,
