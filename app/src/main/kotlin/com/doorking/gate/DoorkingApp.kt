@@ -64,6 +64,18 @@ class AppContainer(context: Context) {
         )
     }
     val stepUpApi: DoorkingApi by lazy { ApiClientFactory.createApi(stepUpOkHttpClient) }
+
+    val mediaOkHttpClient: OkHttpClient by lazy {
+        ApiClientFactory.createMediaOkHttp(
+            baseClient = okHttpClient,
+            sessionStorage = sessionStorage,
+            authEvents = authEvents,
+        )
+    }
+
+    val cameraTestApi: DoorkingApi by lazy {
+        ApiClientFactory.createApi(ApiClientFactory.createCameraTestOkHttp(okHttpClient))
+    }
 }
 
 class DoorkingApp : Application(), SingletonImageLoader.Factory {
@@ -128,7 +140,7 @@ class DoorkingApp : Application(), SingletonImageLoader.Factory {
             }
             .components {
                 if (::container.isInitialized) {
-                    add(OkHttpNetworkFetcherFactory(callFactory = { container.okHttpClient }))
+                    add(OkHttpNetworkFetcherFactory(callFactory = { container.mediaOkHttpClient }))
                 }
             }
             .build()

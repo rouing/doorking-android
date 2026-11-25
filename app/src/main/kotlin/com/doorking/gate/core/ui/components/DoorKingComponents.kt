@@ -60,6 +60,7 @@ import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -315,6 +316,16 @@ fun CollapsibleSectionCard(
     }
 }
 
+private val NO_BORDER = BorderStroke(0.dp, Color.Transparent)
+private val THEME_MODE_OPTIONS = listOf(
+    ThemeMode.SYSTEM to "System",
+    ThemeMode.LIGHT to "Light",
+    ThemeMode.DARK to "Dark",
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+private val EXPANDED_MODAL_SHEET_VALUES = setOf(SheetValue.Hidden, SheetValue.Expanded)
+
 /**
  * 3-way borderless Material 3 segmented theme selector (System / Light / Dark).
  */
@@ -325,22 +336,16 @@ fun ThemeModeSelector(
     modifier: Modifier = Modifier,
     inactiveContainerColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
 ) {
-    val options = listOf(
-        ThemeMode.SYSTEM to "System",
-        ThemeMode.LIGHT to "Light",
-        ThemeMode.DARK to "Dark",
-    )
-    val noBorder = BorderStroke(0.dp, Color.Transparent)
     SingleChoiceSegmentedButtonRow(
         modifier = modifier.fillMaxWidth(),
         space = 2.dp,
     ) {
-        options.forEachIndexed { index, (value, label) ->
+        THEME_MODE_OPTIONS.forEachIndexed { index, (value, label) ->
             SegmentedButton(
                 selected = mode == value,
                 onClick = { onSelect(value) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                border = noBorder,
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = THEME_MODE_OPTIONS.size),
+                border = NO_BORDER,
                 colors = SegmentedButtonDefaults.colors(
                     inactiveContainerColor = inactiveContainerColor,
                     activeBorderColor = Color.Transparent,
@@ -746,7 +751,7 @@ fun MonthDayPickerField(
 @Composable
 fun rememberExpandedModalSheetState(): SheetState = rememberBottomSheetState(
     initialValue = SheetValue.Hidden,
-    enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+    enabledValues = EXPANDED_MODAL_SHEET_VALUES,
 )
 
 /**
@@ -776,7 +781,7 @@ fun PasswordOutlinedField(
     val latestDigitsOnly by rememberUpdatedState(digitsOnly)
     val latestMaxLength by rememberUpdatedState(maxLength)
 
-    LaunchedEffect(value) {
+    SideEffect(value) {
         if (state.text.toString() != value) {
             state.setTextAndPlaceCursorAtEnd(value)
         }

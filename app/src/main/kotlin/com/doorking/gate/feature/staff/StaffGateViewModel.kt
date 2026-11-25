@@ -45,6 +45,7 @@ data class StaffGateUiState(
     val refreshing: Boolean = false,
     val residentsReply: ResidentsReply? = null,
     val transactions: List<TransactionRowDto> = emptyList(),
+    val visibleTransactions: List<TransactionRowDto> = emptyList(),
     val txNextBefore: Long? = null,
     val loadingOlderTx: Boolean = false,
     val prefs: GatePrefsDto = GatePrefsDto(),
@@ -69,6 +70,8 @@ class StaffGateViewModel(
     private val sessionStorage: SessionStorage,
     private val pollIntervalMs: Long = 2_000L,
     private val snapPollIntervalMs: Long = 2_500L,
+    private val resumeRefreshMinIntervalMs: Long = 15_000L,
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(StaffGateUiState())
@@ -77,6 +80,7 @@ class StaffGateViewModel(
     private var jobPoll: Job? = null
     private var snapPoll: Job? = null
     private var active: Boolean = true
+    private var lastJobRefreshMs: Long = Long.MIN_VALUE
 
     init {
         loadAll(initial = true)
@@ -95,7 +99,16 @@ class StaffGateViewModel(
             val resumeSnap = _uiState.value.snapRun?.state == "running"
             if (resumeJob) startJobPolling()
             if (resumeSnap) startSnapPolling()
-            if (!resumeJob && !resumeSnap) refreshJob()
+            if (!resumeJob && !resumeSnap) {
+                val elapsed = if (lastJobRefreshMs == Long.MIN_VALUE) {
+                    Long.MAX_VALUE
+                } else {
+                    clockMs() - lastJobRefreshMs
+                }
+                if (elapsed >= resumeRefreshMinIntervalMs) {
+                    refreshJob()
+                }
+            }
         }
     }
 
@@ -118,9 +131,14 @@ class StaffGateViewModel(
                     val jobDeferred = async { runCatchingNonFatal { api.getJob(gatePhone) }.getOrNull() }
                     val data = dataDeferred.await()
                     val snapsReply = snapsDeferred.await()
+                    val rawTransactions = data?.transactions?.rows.orEmpty()
+                    val visibleTransactions = withContext(Dispatchers.Default) {
+                        hidePortalHoldNoise(rawTransactions)
+                    }
                     LoadedGateBundle(
                         resDeferred.await(),
-                        data?.transactions?.rows.orEmpty(),
+                        rawTransactions,
+                        visibleTransactions,
                         data?.transactions?.next,
                         prefsDeferred.await(),
                         camsDeferred.await(),
@@ -131,11 +149,13 @@ class StaffGateViewModel(
                 }
             }
                 .onSuccess { b ->
+                    lastJobRefreshMs = clockMs()
                     _uiState.value = _uiState.value.copy(
                         loading = false,
                         refreshing = false,
                         residentsReply = b.residents,
                         transactions = b.transactions,
+                        visibleTransactions = b.visibleTransactions,
                         txNextBefore = b.txNextBefore,
                         prefs = b.prefs,
                         cameras = b.cameras,
@@ -164,9 +184,13 @@ class StaffGateViewModel(
             runCatching { api.getData(gatePhone, before = before).transactions }
                 .onSuccess { page ->
                     val merged = _uiState.value.transactions + page?.rows.orEmpty()
+                    val visible = withContext(Dispatchers.Default) {
+                        hidePortalHoldNoise(merged)
+                    }
                     _uiState.value = _uiState.value.copy(
                         loadingOlderTx = false,
                         transactions = merged,
+                        visibleTransactions = visible,
                         txNextBefore = page?.next,
                     )
                 }
@@ -410,6 +434,7 @@ class StaffGateViewModel(
                 }
                 if (reply != null) {
                     consecutiveErrors = 0
+                    lastJobRefreshMs = clockMs()
                     _uiState.value = _uiState.value.copy(
                         snapshots = reply.snapshots,
                         snapRun = reply.run,
@@ -520,6 +545,7 @@ class StaffGateViewModel(
      * a job is running (e.g. after returning from background or opening the Gate/Progress dialog).
      */
     fun refreshJob() {
+        lastJobRefreshMs = clockMs()
         viewModelScope.launch {
             val fetchSnaps = _uiState.value.cameras != null
             val (job, snapReply) = coroutineScope {
@@ -567,6 +593,7 @@ class StaffGateViewModel(
                 }
                 if (job != null) {
                     consecutiveErrors = 0
+                    lastJobRefreshMs = clockMs()
                     val prevState = _uiState.value.job?.state
                     _uiState.value = _uiState.value.copy(job = job)
                     if (job.state != "running") {
@@ -609,6 +636,7 @@ class StaffGateViewModel(
     private data class LoadedGateBundle(
         val residents: ResidentsReply?,
         val transactions: List<TransactionRowDto>,
+        val visibleTransactions: List<TransactionRowDto>,
         val txNextBefore: Long?,
         val prefs: GatePrefsDto,
         val cameras: CameraSettingsDto?,

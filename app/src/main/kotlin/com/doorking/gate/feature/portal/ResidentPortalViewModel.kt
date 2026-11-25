@@ -51,6 +51,7 @@ class ResidentPortalViewModel(
     private val api: DoorkingApi,
     private val pollIntervalMs: Long = 3_000L,
     private val cooldownTickMs: Long = 1_000L,
+    private val cooldownResyncIntervalMs: Long = 15_000L,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ResidentPortalUiState())
@@ -132,8 +133,11 @@ class ResidentPortalViewModel(
                         error = null,
                     )
                     syncCooldownTicker(status)
-                    if (statusPollingEnabled && needsStatusPolling(status) && statusPollJob?.isActive != true) {
+                    if (statusPollingEnabled && needsStatusPolling(status)) {
                         startStatusPolling(immediateRefresh = false)
+                    } else {
+                        statusPollJob?.cancel()
+                        statusPollJob = null
                     }
                 }
                 .onFailure { err ->
@@ -159,7 +163,6 @@ class ResidentPortalViewModel(
                 .onSuccess { alreadyOpen ->
                     val msg = if (alreadyOpen) "$relayName is already open." else "$relayName opened!"
                     _uiState.value = _uiState.value.copy(buzzingRelay = null, bannerMessage = msg)
-                    refreshStatusOnce()
                     loadAll(initial = false)
                 }
                 .onFailure { err ->
@@ -296,6 +299,12 @@ class ResidentPortalViewModel(
     private fun needsStatusPolling(status: PortalStatusReply): Boolean =
         !status.available || status.cooldownSeconds > 0
 
+    private fun nextPollDelayMs(status: PortalStatusReply): Long = when {
+        !status.available -> pollIntervalMs
+        status.cooldownSeconds > 0 -> cooldownResyncIntervalMs
+        else -> 0L
+    }
+
     private fun syncCooldownTicker(status: PortalStatusReply) {
         if (!statusPollingEnabled || !status.available || status.cooldownSeconds <= 0) {
             cooldownTickJob?.cancel()
@@ -310,7 +319,13 @@ class ResidentPortalViewModel(
                 if (!current.available || current.cooldownSeconds <= 0) break
                 val next = (current.cooldownSeconds - 1).coerceAtLeast(0)
                 _uiState.value = _uiState.value.copy(status = current.copy(cooldownSeconds = next))
-                if (next == 0) break
+                if (next == 0) {
+                    cooldownTickJob = null
+                    if (statusPollingEnabled) {
+                        startStatusPolling(immediateRefresh = true)
+                    }
+                    break
+                }
             }
         }
     }
@@ -320,7 +335,7 @@ class ResidentPortalViewModel(
         statusPollJob?.cancel()
         statusPollJob = viewModelScope.launch {
             var consecutiveErrors = 0
-            var delayBeforeNext = if (immediateRefresh) 0L else pollIntervalMs
+            var delayBeforeNext = if (immediateRefresh) 0L else nextPollDelayMs(_uiState.value.status)
             while (isActive && statusPollingEnabled) {
                 if (delayBeforeNext > 0L) {
                     delay(delayBeforeNext)
@@ -339,7 +354,7 @@ class ResidentPortalViewModel(
                     _uiState.value = _uiState.value.copy(status = fetched)
                     syncCooldownTicker(fetched)
                     if (!needsStatusPolling(fetched)) break
-                    delayBeforeNext = pollIntervalMs
+                    delayBeforeNext = nextPollDelayMs(fetched)
                 } else {
                     consecutiveErrors += 1
                     if (consecutiveErrors >= MAX_POLL_ERRORS) break
@@ -348,17 +363,6 @@ class ResidentPortalViewModel(
                 }
             }
         }
-    }
-
-    private suspend fun refreshStatusOnce() {
-        runCatchingNonFatal { api.getPortalStatus(gatePhone) }
-            .onSuccess { status ->
-                _uiState.value = _uiState.value.copy(status = status)
-                syncCooldownTicker(status)
-                if (statusPollingEnabled && needsStatusPolling(status) && statusPollJob?.isActive != true) {
-                    startStatusPolling(immediateRefresh = false)
-                }
-            }
     }
 
     private inline fun <T> runCatchingNonFatal(block: () -> T): Result<T> = try {

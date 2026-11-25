@@ -1,4 +1,5 @@
-• Full Dahua P2P Camera settings & live camera test inside System Settings (with channel-to-relay mapping)
-• Back button now returns to the last page visited across Staff and Resident views
-• Native Google Sign-In popup with seamless Custom Tabs fallback
-• Cleaner Gate sheet with a compact "Running" status pill and draft Save/Discard buttons shown only when edits exist
+• Faster cold startup, smoother scrolling & dark-mode launch screen
+• Smarter widget cooldown recovery, instant offline Refresh feedback & offline sign-out clearing
+• Stricter opt-in push notifications & faster camera/video playback with less battery use
+• Full Dahua P2P Camera settings & live test inside System Settings
+• History-based Back navigation returning to your last visited page across Staff & Resident views

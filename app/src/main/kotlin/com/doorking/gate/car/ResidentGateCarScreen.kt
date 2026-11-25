@@ -176,6 +176,9 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
                     }
 
                     is CarGateUiState.Error -> {
+                        if (shouldStopErrorPolling(consecutiveErrors)) {
+                            return@launch
+                        }
                         val backoffMs = (ERROR_BACKOFF_BASE_MS shl consecutiveErrors.coerceAtMost(3))
                             .coerceAtMost(ERROR_BACKOFF_MAX_MS)
                         delay(backoffMs)
@@ -288,7 +291,7 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             )
         }
         consecutiveErrors = if (next is CarGateUiState.Error) {
-            (consecutiveErrors + 1).coerceAtMost(4)
+            (consecutiveErrors + 1).coerceAtMost(MAX_POLL_ERRORS)
         } else {
             0
         }
@@ -346,13 +349,17 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
         }
     }
 
-    private companion object {
+    internal companion object {
         const val COOLDOWN_TICK_MS = 1_000L
         const val COOLDOWN_RESYNC_TICKS = 10
         const val FAST_POLL_MS = 2_000L
-        const val IDLE_POLL_MS = 10_000L
+        const val IDLE_POLL_MS = 45_000L
         const val FULL_REFRESH_EVERY_IDLE_TICKS = 6
         const val ERROR_BACKOFF_BASE_MS = 10_000L
         const val ERROR_BACKOFF_MAX_MS = 60_000L
+        const val MAX_POLL_ERRORS = 5
+
+        fun shouldStopErrorPolling(consecutiveErrors: Int): Boolean =
+            consecutiveErrors >= MAX_POLL_ERRORS
     }
 }

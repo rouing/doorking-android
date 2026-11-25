@@ -91,6 +91,7 @@ class GateWidgetRepositoryTest {
         assertEquals("Oakridge", snap.gateName)
         assertEquals("Main Gate", snap.buzzRelayName)
         assertEquals("Ready", snap.statusText)
+        assertEquals(0, snap.cooldownSeconds)
 
         val outcome = GateWidgetRepository.buzz(api, "2145550100", 0, "Main Gate", "101")
         assertTrue(outcome is WidgetBuzzOutcome.Opened)
@@ -366,6 +367,168 @@ class GateWidgetRepositoryTest {
         assertTrue(GateQuickWidget.decodeRelays(null).isEmpty())
         assertTrue(GateQuickWidget.decodeRelays("   ").isEmpty())
         assertTrue(GateQuickWidget.decodeRelays("not-json").isEmpty())
+    }
+
+    @Test
+    fun populatesCooldownSecondsAndDisablesBuzzDuringCooldown() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/session" -> json(
+                    200,
+                    """{"loggedIn":true,"user":"res_101","isResidentOnly":true,"gate":{"phoneNumber":"2145550100","siteName":"Oakridge","role":"resident"}}""",
+                )
+                request.path!!.startsWith("/api/portal/gates/2145550100/me") -> json(
+                    200,
+                    """{"gate":{"phoneNumber":"2145550100","siteName":"Oakridge"},"unit":{"directoryCode":"101","name":"Jordan"},"portal":{"enabled":true,"buzzEnabled":true,"buzzRelays":[0],"buzzRelayLabels":[{"relay":0,"name":"Main Gate"}]},"reroll":{"remainingToday":1}}""",
+                )
+                request.path == "/api/portal/gates/2145550100/status" -> json(
+                    200,
+                    """{"available":true,"cooldownSeconds":18}""",
+                )
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"c".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        val snap = GateWidgetRepository.fetchSnapshot(storage, api)
+        assertTrue(snap.signedIn)
+        assertFalse(snap.canBuzz)
+        assertEquals("Wait 18s", snap.statusText)
+        assertEquals(GateWidgetSnapshot.TONE_NEUTRAL, snap.statusTone)
+        assertEquals(18, snap.cooldownSeconds)
+    }
+
+    @Test
+    fun fetchSnapshotPropagatesCancellationExceptionDuringListGates() = runBlocking {
+        val requestStarted = CountDownLatch(1)
+        val releaseServer = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/session" -> json(200, """{"loggedIn":true,"user":"admin"}""")
+                "/api/gates" -> {
+                    requestStarted.countDown()
+                    releaseServer.await(5, TimeUnit.SECONDS)
+                    json(200, """{"gates":[{"phoneNumber":"2145550100","siteName":"Oakridge"}]}""")
+                }
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"d".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        var caughtCancellation = false
+        var returnedSnapshot: GateWidgetSnapshot? = null
+        val job = launch(Dispatchers.IO) {
+            try {
+                returnedSnapshot = GateWidgetRepository.fetchSnapshot(storage, api)
+            } catch (_: CancellationException) {
+                caughtCancellation = true
+            }
+        }
+        try {
+            assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertTrue("CancellationException during listGates must propagate", caughtCancellation)
+            assertNull(returnedSnapshot)
+        } finally {
+            releaseServer.countDown()
+        }
+    }
+
+    @Test
+    fun fetchSnapshotPropagatesCancellationExceptionDuringGetPortalMe() = runBlocking {
+        val requestStarted = CountDownLatch(1)
+        val releaseServer = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/session" -> json(
+                    200,
+                    """{"loggedIn":true,"user":"res_101","isResidentOnly":true,"gate":{"phoneNumber":"2145550100","siteName":"Oakridge","role":"resident"}}""",
+                )
+                request.path!!.startsWith("/api/portal/gates/2145550100/me") -> {
+                    requestStarted.countDown()
+                    releaseServer.await(5, TimeUnit.SECONDS)
+                    json(
+                        200,
+                        """{"gate":{"phoneNumber":"2145550100","siteName":"Oakridge"},"unit":{"directoryCode":"101","name":"Jordan"},"portal":{"enabled":true,"buzzEnabled":true,"buzzRelays":[0],"buzzRelayLabels":[{"relay":0,"name":"Main Gate"}]},"reroll":{"remainingToday":1}}""",
+                    )
+                }
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"e".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        var caughtCancellation = false
+        var returnedSnapshot: GateWidgetSnapshot? = null
+        val job = launch(Dispatchers.IO) {
+            try {
+                returnedSnapshot = GateWidgetRepository.fetchSnapshot(storage, api)
+            } catch (_: CancellationException) {
+                caughtCancellation = true
+            }
+        }
+        try {
+            assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertTrue("CancellationException during getPortalMe must propagate", caughtCancellation)
+            assertNull(returnedSnapshot)
+        } finally {
+            releaseServer.countDown()
+        }
+    }
+
+    @Test
+    fun fetchSnapshotPropagatesCancellationExceptionDuringGetPortalStatus() = runBlocking {
+        val requestStarted = CountDownLatch(1)
+        val releaseServer = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/session" -> json(
+                    200,
+                    """{"loggedIn":true,"user":"res_101","isResidentOnly":true,"gate":{"phoneNumber":"2145550100","siteName":"Oakridge","role":"resident"}}""",
+                )
+                request.path!!.startsWith("/api/portal/gates/2145550100/me") -> json(
+                    200,
+                    """{"gate":{"phoneNumber":"2145550100","siteName":"Oakridge"},"unit":{"directoryCode":"101","name":"Jordan"},"portal":{"enabled":true,"buzzEnabled":true,"buzzRelays":[0],"buzzRelayLabels":[{"relay":0,"name":"Main Gate"}]},"reroll":{"remainingToday":1}}""",
+                )
+                request.path == "/api/portal/gates/2145550100/status" -> {
+                    requestStarted.countDown()
+                    releaseServer.await(5, TimeUnit.SECONDS)
+                    json(200, """{"available":true,"cooldownSeconds":0}""")
+                }
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"f".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        var caughtCancellation = false
+        var returnedSnapshot: GateWidgetSnapshot? = null
+        val job = launch(Dispatchers.IO) {
+            try {
+                returnedSnapshot = GateWidgetRepository.fetchSnapshot(storage, api)
+            } catch (_: CancellationException) {
+                caughtCancellation = true
+            }
+        }
+        try {
+            assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertTrue("CancellationException during getPortalStatus must propagate", caughtCancellation)
+            assertNull(returnedSnapshot)
+        } finally {
+            releaseServer.countDown()
+        }
     }
 
     @Test

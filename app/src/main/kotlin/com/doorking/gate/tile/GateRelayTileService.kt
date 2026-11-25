@@ -117,24 +117,29 @@ object GateRelayTileManager {
         syncVisibleRelays(context, emptyList())
     }
 
-    fun requestAddTile(
+    suspend fun requestAddTile(
         context: Context,
         slotIndex: Int,
         onResult: ((Int) -> Unit)? = null,
     ): Boolean {
-        val cfg = loadSlotsBlocking(context).getOrNull(slotIndex) ?: return false
-        val cls = serviceClasses.getOrNull(slotIndex) ?: return false
         val appCtx = context.applicationContext
+        val cls = serviceClasses.getOrNull(slotIndex) ?: return false
         val component = ComponentName(appCtx, cls)
-        return runCatching {
-            val pm = appCtx.packageManager
-            if (pm.getComponentEnabledSetting(component) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
-                pm.setComponentEnabledSetting(
-                    component,
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                    PackageManager.DONT_KILL_APP,
-                )
+        val cfg = withContext(Dispatchers.IO) {
+            val slot = loadSlotsBlocking(appCtx).getOrNull(slotIndex) ?: return@withContext null
+            runCatching {
+                val pm = appCtx.packageManager
+                if (pm.getComponentEnabledSetting(component) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
+                    pm.setComponentEnabledSetting(
+                        component,
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        PackageManager.DONT_KILL_APP,
+                    )
+                }
             }
+            slot
+        } ?: return false
+        return runCatching {
             val sbm = appCtx.getSystemService(StatusBarManager::class.java) ?: return false
             val label = cfg.relayName.ifBlank { "Relay ${cfg.relay}" }
             val icon = Icon.createWithResource(appCtx, R.drawable.ic_widget_lock)
@@ -204,6 +209,17 @@ abstract class BaseGateRelayTileService(private val slotIndex: Int) : TileServic
                         t.subtitle = "Opening…"
                         t.updateTile()
                     }
+                }
+                val stored = app.container.sessionStorage.awaitLoaded()
+                if (stored.sessionToken.isNullOrBlank()) {
+                    withContext(Dispatchers.Main) {
+                        qsTile?.let { t ->
+                            t.state = Tile.STATE_INACTIVE
+                            t.subtitle = "Sign in first"
+                            t.updateTile()
+                        }
+                    }
+                    return@launch
                 }
                 val (opened, message) = runCatching {
                     val res = app.container.api.portalBuzz(

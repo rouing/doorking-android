@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.ReportDrawn
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,7 +43,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,6 +66,7 @@ import com.doorking.gate.core.network.AuthEvent
 import com.doorking.gate.core.network.PendingPasskeyApprovalDto
 import com.doorking.gate.core.network.RespondPasskeyApprovalRequest
 import com.doorking.gate.core.push.DoorkingFirebaseMessagingService
+import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.theme.DoorkingTheme
 import com.doorking.gate.core.update.PlayInAppUpdateController
@@ -87,6 +88,7 @@ class MainActivity : FragmentActivity() {
     private val resumeTick = MutableStateFlow(0)
     private var backgroundedAtMs: Long = 0L
     private var checkedUpdateInOnStart: Boolean = false
+    private var lastApprovalFetchMs: Long = 0L
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,7 +117,6 @@ class MainActivity : FragmentActivity() {
                 val scope = rememberCoroutineScope()
                 var pendingApprovals by remember { mutableStateOf<List<PendingPasskeyApprovalDto>>(emptyList()) }
                 var approvalToast by remember { mutableStateOf<String?>(null) }
-                var lastApprovalFetchMs by remember { mutableLongStateOf(0L) }
 
                 // Check for a saved crash trace off the main thread so startup never blocks on disk I/O.
                 LaunchedEffect(Unit) {
@@ -135,7 +136,7 @@ class MainActivity : FragmentActivity() {
                     ThemeMode.LIGHT -> false
                     ThemeMode.DARK -> true
                 }
-                SideEffect {
+                SideEffect(darkTheme) {
                     enableEdgeToEdge(
                         statusBarStyle = SystemBarStyle.auto(
                             lightScrim = Color.TRANSPARENT,
@@ -153,7 +154,7 @@ class MainActivity : FragmentActivity() {
                 // Only mark unlocked once DataStore has loaded; prevents cold-start race where initial
                 // empty StoredAuthState(loaded = false) would prematurely unlock before reading prefs.
                 val hasSession = !authState.sessionToken.isNullOrBlank()
-                SideEffect {
+                SideEffect(authState.loaded, hasSession, authState.biometricLockEnabled) {
                     if (authState.loaded && (!hasSession || !authState.biometricLockEnabled) && !biometricUnlocked.value) {
                         biometricUnlocked.value = true
                     }
@@ -184,24 +185,25 @@ class MainActivity : FragmentActivity() {
                     }
                 }
 
-                LaunchedEffect(hasSession, locked, currentResumeTick) {
-                    if (hasSession && !locked) {
+                if (hasSession && !locked) {
+                    LaunchedEffect(currentResumeTick) {
                         fetchPendingApprovals()
-                    } else {
+                    }
+
+                    LaunchedEffect(Unit) {
+                        container.passkeyApprovalRequests.collect { reqId ->
+                            fetchPendingApprovals(prioritizeId = reqId)
+                            container.passkeyApprovalRequests.resetReplayCache()
+                        }
+                    }
+                } else if (pendingApprovals.isNotEmpty()) {
+                    SideEffect(hasSession, locked) {
                         pendingApprovals = emptyList()
                     }
                 }
 
-                LaunchedEffect(hasSession, locked) {
-                    if (!hasSession || locked) return@LaunchedEffect
-                    container.passkeyApprovalRequests.collect { reqId ->
-                        fetchPendingApprovals(prioritizeId = reqId)
-                        container.passkeyApprovalRequests.resetReplayCache()
-                    }
-                }
-
-                LaunchedEffect(approvalToast) {
-                    if (approvalToast != null) {
+                if (approvalToast != null) {
+                    LaunchedEffect(approvalToast) {
                         delay(3_500L)
                         approvalToast = null
                     }
@@ -220,6 +222,13 @@ class MainActivity : FragmentActivity() {
                                 onUnlocked = { biometricUnlocked.value = true },
                                 onSignOut = {
                                     scope.launch {
+                                        runCatching {
+                                            FirebaseHelper.unregisterCurrentDevice(
+                                                this@MainActivity,
+                                                container.api,
+                                                container.sessionStorage,
+                                            )
+                                        }
                                         runCatching { container.api.signOut() }
                                         container.sessionStorage.clearSessionToken()
                                         container.authEvents.emit(AuthEvent.SessionExpired)
@@ -359,19 +368,23 @@ class MainActivity : FragmentActivity() {
         if (app.startupCrash != null || intent == null) return
         if ((intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return
 
-        val approvalReqId = intent.getStringExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
+        val approvalReqId = runCatching {
+            intent.getStringExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
+        }.getOrNull()
         if (!approvalReqId.isNullOrBlank()) {
-            intent.removeExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
+            runCatching {
+                intent.removeExtra(DoorkingFirebaseMessagingService.EXTRA_PASSKEY_APPROVAL_REQUEST_ID)
+            }
             if (APPROVAL_REQUEST_ID_RE.matches(approvalReqId)) {
                 app.container.passkeyApprovalRequests.tryEmit(approvalReqId)
             }
         }
-        val uri = intent.data ?: return
+        val uri = runCatching { intent.data }.getOrNull() ?: return
         if (uri.scheme == "doorking" && uri.host == "sso" && uri.path == "/callback") {
-            intent.data = null
+            runCatching { intent.data = null }
             app.container.ssoCallbacks.tryEmit(uri)
         } else if (uri.scheme == "doorking" && uri.host == "invite") {
-            intent.data = null
+            runCatching { intent.data = null }
             app.container.inviteLinks.tryEmit(uri)
         }
     }
@@ -543,6 +556,7 @@ private fun BiometricLockOverlay(
     onUnlocked: () -> Unit,
     onSignOut: () -> Unit,
 ) {
+    ReportDrawn()
     var error by remember { mutableStateOf<String?>(null) }
     var promptTrigger by remember { mutableIntStateOf(0) }
     val currentOnUnlocked by rememberUpdatedState(onUnlocked)

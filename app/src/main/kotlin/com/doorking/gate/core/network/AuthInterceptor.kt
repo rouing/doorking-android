@@ -59,7 +59,6 @@ class DoorkingAuthInterceptor(
         val original = chain.request()
         val explicitUrl = original.header(HEADER_EXPLICIT_URL) == "1"
         val noInteractiveStepUp = original.header(HEADER_NO_INTERACTIVE_STEP_UP) == "1"
-        val alreadyRetried = original.header(HEADER_STEP_UP_RETRIED) == "1"
 
         val rewritten = if (explicitUrl) original else rewriteUrl(original)
         val path = rewritten.url.encodedPath
@@ -75,7 +74,6 @@ class DoorkingAuthInterceptor(
         val builder = rewritten.newBuilder()
             .removeHeader(HEADER_EXPLICIT_URL)
             .removeHeader(HEADER_NO_INTERACTIVE_STEP_UP)
-            .removeHeader(HEADER_STEP_UP_RETRIED)
             .header("Accept", "application/json")
 
         val shouldAttachBearer = original.header("Authorization") == null &&
@@ -117,7 +115,7 @@ class DoorkingAuthInterceptor(
                 return response
             }
             val coordinator = stepUpCoordinator
-            val skipInteractive = alreadyRetried || noInteractiveStepUp || path in STEP_UP_PATHS
+            val skipInteractive = noInteractiveStepUp || path in STEP_UP_PATHS
             if (errorBody?.stepUp == true && !skipInteractive && coordinator != null) {
                 val confirmed = runBlocking { coordinator.confirmStepUp(errorBody) }
                 if (confirmed) {
@@ -169,7 +167,6 @@ class DoorkingAuthInterceptor(
     companion object {
         const val HEADER_NO_INTERACTIVE_STEP_UP = "X-Doorking-No-Interactive-StepUp"
         const val HEADER_EXPLICIT_URL = "X-Doorking-Explicit-Url"
-        private const val HEADER_STEP_UP_RETRIED = "X-Doorking-StepUp-Retried"
         private const val MAX_ERROR_PEEK_BYTES = 16_384L
 
         private val UNAUTHENTICATED_PATHS = setOf(

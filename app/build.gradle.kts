@@ -36,8 +36,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 31
-    versionName = "1.0.30"
+    versionCode = 32
+    versionName = "1.0.31"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -90,7 +90,13 @@ android {
 
   packaging {
     resources {
-      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += listOf(
+        "/META-INF/{AL2.0,LGPL2.1}",
+        "/DebugProbesKt.bin",
+        "/META-INF/androidx/**/LICENSE.txt",
+        "/kotlin/**/*.kotlin_builtins",
+        "/*.proto",
+      )
     }
   }
 

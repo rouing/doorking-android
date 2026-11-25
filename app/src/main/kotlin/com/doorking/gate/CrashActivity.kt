@@ -5,8 +5,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
+import android.net.TrafficStats
 import android.os.Build
-import android.os.Bundle
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -33,6 +33,7 @@ import kotlin.concurrent.thread
 object CrashStore {
     private const val FILE_NAME = "last_crash.txt"
     private const val UPLOAD_PENDING_FILE = "pending_crash_upload.json"
+    private const val TAG_CRASH_UPLOAD = 0x444B06
 
     private val BEARER_RE = Regex("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+")
     private val DKS_TOKEN_RE = Regex("\\bdks_[A-Za-z0-9_-]{8,}\\b")
@@ -96,33 +97,36 @@ object CrashStore {
             onStatus?.invoke("No server configured.")
             return
         }
-        val pendingFile = File(context.filesDir, UPLOAD_PENDING_FILE)
-        val payload = runCatching {
-            if (pendingFile.exists()) {
-                pendingFile.readText().takeIf { it.isNotBlank() }
-            } else {
-                read(context)?.let { trace ->
-                    buildJsonObject {
-                        put("appVersion", JsonPrimitive(BuildConfig.VERSION_NAME))
-                        put("versionCode", JsonPrimitive(BuildConfig.VERSION_CODE))
-                        put("device", JsonPrimitive("${Build.MANUFACTURER} ${Build.MODEL} (${Build.SUPPORTED_ABIS.firstOrNull().orEmpty()})"))
-                        put("sdkInt", JsonPrimitive(Build.VERSION.SDK_INT))
-                        put("thread", JsonPrimitive("unknown"))
-                        put("trace", JsonPrimitive(trace))
-                    }.toString()
-                }
-            }
-        }.getOrNull() ?: run {
-            onStatus?.invoke("No pending crash report to send.")
-            return
-        }
+        val appContext = context.applicationContext
         val target = "$cleanServer/api/client-crashes"
         thread(name = "doorking-crash-upload", isDaemon = true) {
+            val pendingFile = File(appContext.filesDir, UPLOAD_PENDING_FILE)
+            val payload = runCatching {
+                if (pendingFile.exists()) {
+                    pendingFile.readText().takeIf { it.isNotBlank() }
+                } else {
+                    read(appContext)?.let { trace ->
+                        buildJsonObject {
+                            put("appVersion", JsonPrimitive(BuildConfig.VERSION_NAME))
+                            put("versionCode", JsonPrimitive(BuildConfig.VERSION_CODE))
+                            put("device", JsonPrimitive("${Build.MANUFACTURER} ${Build.MODEL} (${Build.SUPPORTED_ABIS.firstOrNull().orEmpty()})"))
+                            put("sdkInt", JsonPrimitive(Build.VERSION.SDK_INT))
+                            put("thread", JsonPrimitive("unknown"))
+                            put("trace", JsonPrimitive(trace))
+                        }.toString()
+                    }
+                }
+            }.getOrNull()
+            if (payload == null) {
+                onStatus?.invoke("No pending crash report to send.")
+                return@thread
+            }
             val client = OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()
+            runCatching { TrafficStats.setThreadStatsTag(TAG_CRASH_UPLOAD) }
             val outcome = try {
                 val req = Request.Builder()
                     .url(target)
@@ -139,6 +143,7 @@ object CrashStore {
             } catch (_: Throwable) {
                 "Could not reach server. Try again when online."
             } finally {
+                runCatching { TrafficStats.clearThreadStatsTag() }
                 runCatching { client.dispatcher.executorService.shutdown() }
                 runCatching { client.connectionPool.evictAll() }
             }
@@ -221,9 +226,16 @@ object CrashStore {
 
         val retryBtn = Button(activity).apply {
             text = "Clear & Retry"
-            setOnClickListener {
-                clear(activity)
-                onRetry()
+            setOnClickListener { btn ->
+                btn.isEnabled = false
+                thread(name = "doorking-crash-clear", isDaemon = true) {
+                    clear(activity)
+                    activity.runOnUiThread {
+                        if (!activity.isFinishing && !activity.isDestroyed) {
+                            onRetry()
+                        }
+                    }
+                }
             }
         }
 
@@ -252,19 +264,5 @@ object CrashStore {
         root.addView(buttonRow)
         root.addView(scroll)
         activity.setContentView(root)
-    }
-}
-
-class CrashActivity : Activity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        thread(name = "doorking-crash-read", isDaemon = true) {
-            val trace = CrashStore.read(this) ?: "No crash trace recorded."
-            runOnUiThread {
-                if (!isFinishing && !isDestroyed) {
-                    CrashStore.showInlineCrashView(this, trace, serverUrl = null) { finish() }
-                }
-            }
-        }
     }
 }

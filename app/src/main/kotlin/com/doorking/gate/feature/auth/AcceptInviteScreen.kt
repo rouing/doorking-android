@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -55,7 +56,9 @@ import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.URI
 
 data class ParsedInviteLink(
@@ -119,7 +122,9 @@ fun AcceptInviteScreen(
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
-    val biometricAvailable = remember(context) { BiometricUnlockManager.isAvailable(context) }
+    val biometricAvailable by produceState(initialValue = false, context) {
+        value = withContext(Dispatchers.IO) { BiometricUnlockManager.isAvailable(context) }
+    }
     val requiresSignOutConfirm = !signedInUser.isNullOrBlank()
     var confirmedSignOut by remember(serverUrl, token, signedInUser) { mutableStateOf(!requiresSignOutConfirm) }
     var checking by remember(serverUrl, token) { mutableStateOf(true) }

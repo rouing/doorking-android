@@ -82,9 +82,6 @@ interface DoorkingApi {
     @DELETE("api/me/fcm/{id}")
     suspend fun deleteFcmToken(@Path("id") id: String): Response<FcmTokensReply>
 
-    @POST("api/me/fcm/test")
-    suspend fun sendTestFcm(@Body body: JsonObject = JsonObject(emptyMap())): Response<TestFcmReply>
-
     // --- Web Push Subscriptions (browsers, desktop PWAs) ---
 
     @GET("api/me/push")
@@ -101,9 +98,6 @@ interface DoorkingApi {
 
     @POST("api/password-reset/request")
     suspend fun requestPasswordReset(@Body body: PasswordResetRequest): Response<MessageResponse>
-
-    @POST("api/invite/check")
-    suspend fun checkInvite(@Body body: InviteCheckRequest): Response<InviteCheckResponse>
 
     @POST
     @Headers("X-Doorking-Explicit-Url: 1")
@@ -167,9 +161,6 @@ interface DoorkingApi {
 
     @GET("api/gate-add")
     suspend fun getGateAddJob(): GateAddStatusReply
-
-    @DELETE("api/gates/{phone}")
-    suspend fun leaveGate(@Path("phone") phone: String): OkResponse
 
     // --- Staff Gate Operations ---
 
@@ -383,23 +374,10 @@ interface DoorkingApi {
     @GET("api/gates/{phone}/users")
     suspend fun getGateUsers(@Path("phone") phone: String): GateUsersReply
 
-    @POST("api/gates/{phone}/users")
-    suspend fun createGateUser(
-        @Path("phone") phone: String,
-        @Body body: CreateGateUserRequest,
-    ): Response<GateUsersReply>
-
     @POST("api/gates/{phone}/share")
     suspend fun shareGate(
         @Path("phone") phone: String,
         @Body body: ShareGateRequest,
-    ): Response<GateUsersReply>
-
-    @PUT("api/gates/{phone}/users/{username}")
-    suspend fun updateGateUserRole(
-        @Path("phone") phone: String,
-        @Path("username") username: String,
-        @Body body: UpdateRoleRequest,
     ): Response<GateUsersReply>
 
     @DELETE("api/gates/{phone}/users/{username}")

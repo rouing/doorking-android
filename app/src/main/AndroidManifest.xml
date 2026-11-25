@@ -8,6 +8,9 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE"
         tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.USE_FINGERPRINT"
+        tools:node="remove" />
 
     <queries>
         <intent>
@@ -57,11 +60,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".CrashActivity"
-            android:exported="false"
-            android:process=":crash" />
-
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -87,6 +85,30 @@
 
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
+            tools:node="remove" />
+        <service
+            android:name="androidx.work.impl.background.systemalarm.SystemAlarmService"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryChargingProxy"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryNotLowProxy"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.ConstraintProxy$StorageNotLowProxy"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.ConstraintProxy$NetworkStateProxy"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.RescheduleReceiver"
+            tools:node="remove" />
+        <receiver
+            android:name="androidx.work.impl.background.systemalarm.ConstraintProxyUpdateReceiver"
+            tools:node="remove" />
+        <service
+            android:name="androidx.room.MultiInstanceInvalidationService"
             tools:node="remove" />
 
         <service

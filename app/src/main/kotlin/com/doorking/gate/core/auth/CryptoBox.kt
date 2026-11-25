@@ -22,9 +22,17 @@ class KeystoreTokenCipher(
     private val keyAlias: String = "doorking_session_aes_gcm",
 ) : TokenCipher {
 
+    @Volatile
+    private var cachedKey: SecretKey? = null
+
     override fun encrypt(plaintext: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        try {
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        } catch (_: Throwable) {
+            cachedKey = null
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        }
         val iv = cipher.iv
         val encrypted = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
         val combined = ByteArray(iv.size + encrypted.size)
@@ -41,23 +49,34 @@ class KeystoreTokenCipher(
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(TAG_BITS, iv))
         String(cipher.doFinal(body), Charsets.UTF_8)
+    }.onFailure {
+        cachedKey = null
     }.getOrNull()
 
     private fun getOrCreateKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        val existing = ks.getKey(keyAlias, null) as? SecretKey
-        if (existing != null) return existing
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            keyAlias,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .build()
-        generator.init(spec)
-        return generator.generateKey()
+        cachedKey?.let { return it }
+        synchronized(this) {
+            cachedKey?.let { return it }
+            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val existing = ks.getKey(keyAlias, null) as? SecretKey
+            val resolved = if (existing != null) {
+                existing
+            } else {
+                val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+                val spec = KeyGenParameterSpec.Builder(
+                    keyAlias,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .build()
+                generator.init(spec)
+                generator.generateKey()
+            }
+            cachedKey = resolved
+            return resolved
+        }
     }
 
     private companion object {

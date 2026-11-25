@@ -1,5 +1,6 @@
 package com.doorking.gate.core.media
 
+import android.view.View
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
@@ -21,11 +23,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,12 +42,16 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import com.doorking.gate.core.ui.components.ErrorBanner
 import okhttp3.OkHttpClient
 
 data class MediaItemEntry(
@@ -68,6 +75,11 @@ fun MediaViewerDialog(
     if (items.isEmpty()) return
     var selectedIndex by remember(items) { mutableIntStateOf(0) }
     val active = items.getOrElse(selectedIndex) { items.first() }
+    var lastVideoUrl by remember(items) {
+        mutableStateOf(items.firstOrNull()?.takeIf { it.isVideo }?.url)
+    }
+    var videoError by remember(items) { mutableStateOf<String?>(null) }
+    var retryNonce by remember(items) { mutableIntStateOf(0) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -116,7 +128,12 @@ fun MediaViewerDialog(
                         items.forEachIndexed { idx, entry ->
                             FilterChip(
                                 selected = idx == selectedIndex,
-                                onClick = { selectedIndex = idx },
+                                onClick = {
+                                    selectedIndex = idx
+                                    if (entry.isVideo) {
+                                        lastVideoUrl = entry.url
+                                    }
+                                },
                                 label = { Text(entry.label) },
                             )
                         }
@@ -130,13 +147,18 @@ fun MediaViewerDialog(
                         .background(Color.Black, MaterialTheme.shapes.medium),
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (active.isVideo) {
+                    val videoUrl = lastVideoUrl
+                    if (videoUrl != null) {
                         AuthenticatedVideoPlayer(
-                            url = active.url,
+                            url = videoUrl,
+                            isVisible = active.isVideo,
+                            retryNonce = retryNonce,
                             okHttpClient = okHttpClient,
-                            modifier = Modifier.matchParentSize(),
+                            onPlaybackError = { videoError = it },
+                            modifier = if (active.isVideo) Modifier.matchParentSize() else Modifier.size(0.dp),
                         )
-                    } else {
+                    }
+                    if (!active.isVideo) {
                         AsyncImage(
                             model = active.url,
                             contentDescription = active.label,
@@ -145,49 +167,98 @@ fun MediaViewerDialog(
                         )
                     }
                 }
+
+                if (active.isVideo && videoError != null) {
+                    ErrorBanner(
+                        message = videoError!!,
+                        onRetry = {
+                            videoError = null
+                            retryNonce++
+                        },
+                    )
+                }
             }
         }
     }
 }
 
+private class VideoPlayerHolder(
+    var view: PlayerView? = null,
+    var resumeOnStart: Boolean = false,
+    var pausedByHide: Boolean = false,
+    var isVisible: Boolean = true,
+)
+
 @OptIn(UnstableApi::class)
 @Composable
 private fun AuthenticatedVideoPlayer(
     url: String,
+    isVisible: Boolean,
+    retryNonce: Int,
     okHttpClient: OkHttpClient,
+    onPlaybackError: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val player = remember(context, okHttpClient) {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(5_000, 15_000, 1_500, 3_000)
+            .setTargetBufferBytes(8 * 1024 * 1024)
+            .build()
         val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
         ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
     }
-    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
-    var resumeOnStart by remember { mutableStateOf(false) }
+    val holder = remember { VideoPlayerHolder(isVisible = isVisible) }
+    val latestOnPlaybackError by rememberUpdatedState(onPlaybackError)
 
-    LaunchedEffect(player, url) {
+    SideEffect(player, url, retryNonce) {
+        latestOnPlaybackError(null)
+        holder.pausedByHide = false
         player.setMediaItem(MediaItem.fromUri(url))
-        player.playWhenReady = true
+        player.playWhenReady = isVisible
         player.prepare()
     }
 
+    SideEffect(player, isVisible) {
+        holder.isVisible = isVisible
+        if (isVisible) {
+            if (holder.pausedByHide) {
+                holder.pausedByHide = false
+                player.play()
+            }
+        } else {
+            holder.pausedByHide = player.playWhenReady
+            player.pause()
+        }
+    }
+
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
-        resumeOnStart = player.playWhenReady
+        holder.resumeOnStart = holder.isVisible && player.playWhenReady
         player.pause()
     }
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
-        if (resumeOnStart) {
+        if (holder.resumeOnStart && holder.isVisible) {
+            holder.resumeOnStart = false
             player.play()
         }
     }
 
     DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                val detail = error.message?.takeIf { it.isNotBlank() } ?: error.errorCodeName
+                latestOnPlaybackError("Video playback failed ($detail)")
+            }
+        }
+        player.addListener(listener)
         onDispose {
-            playerViewRef?.player = null
-            playerViewRef = null
+            player.removeListener(listener)
+            holder.view?.player = null
+            holder.view = null
             player.release()
         }
     }
@@ -197,11 +268,16 @@ private fun AuthenticatedVideoPlayer(
             PlayerView(ctx).apply {
                 this.player = player
                 useController = true
-                playerViewRef = this
+                visibility = if (isVisible) View.VISIBLE else View.GONE
+                holder.view = this
             }
         },
         update = { view ->
-            playerViewRef = view
+            holder.view = view
+            val targetVisibility = if (isVisible) View.VISIBLE else View.GONE
+            if (view.visibility != targetVisibility) {
+                view.visibility = targetVisibility
+            }
             if (view.player !== player) {
                 view.player = player
             }

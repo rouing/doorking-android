@@ -27,18 +27,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Receiver registered in `AndroidManifest.xml`; triggers an immediate WorkManager sync when the widget is placed or enabled.
+ * Receiver registered in `AndroidManifest.xml`; triggers an immediate WorkManager sync when the widget is updated or placed.
  */
 class GateQuickWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = GateQuickWidget()
-
-    override fun onEnabled(context: Context) {
-        super.onEnabled(context)
-        GateWidgetUpdater.enqueueSync(context, ExistingWorkPolicy.KEEP)
-    }
 
     override fun onUpdate(
         context: Context,
@@ -58,18 +54,24 @@ object GateWidgetUpdater {
     fun enqueueSync(
         context: Context,
         policy: ExistingWorkPolicy = ExistingWorkPolicy.REPLACE,
+        requireNetwork: Boolean = true,
+        delaySeconds: Long = 0L,
     ) {
-        val req = OneTimeWorkRequestBuilder<SyncGateWidgetWorker>()
-            .setConstraints(
+        val builder = OneTimeWorkRequestBuilder<SyncGateWidgetWorker>()
+        if (requireNetwork) {
+            builder.setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build(),
             )
-            .build()
+        }
+        if (delaySeconds > 0L) {
+            builder.setInitialDelay(delaySeconds, TimeUnit.SECONDS)
+        }
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
             WORK_SYNC,
             policy,
-            req,
+            builder.build(),
         )
     }
 
@@ -97,7 +99,8 @@ object GateWidgetUpdater {
         val widget = GateQuickWidget()
         val ids = runCatching {
             GlanceAppWidgetManager(context).getGlanceIds(GateQuickWidget::class.java)
-        }.getOrDefault(emptyList())
+        }.onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(emptyList())
         for (glanceId in ids) {
             runCatching {
                 updateAppWidgetState(context, glanceId) { prefs ->
@@ -116,7 +119,7 @@ object GateWidgetUpdater {
                 }
                 // Explicit update required after updateAppWidgetState (per glance-appwidget-updates-and-memory).
                 widget.update(context, glanceId)
-            }
+            }.onFailure { if (it is CancellationException) throw it }
         }
         if (!snapshot.signedIn) {
             RelaySingleWidget.clearAll(context)
@@ -176,6 +179,14 @@ class SyncGateWidgetWorker(
         if (app.startupCrash != null) return Result.failure()
         val snapshot = GateWidgetRepository.fetchSnapshot(app.container.sessionStorage, app.container.api)
         GateWidgetUpdater.writeSnapshotToAll(applicationContext, snapshot)
+        if (snapshot.cooldownSeconds > 0) {
+            GateWidgetUpdater.enqueueSync(
+                applicationContext,
+                policy = ExistingWorkPolicy.REPLACE,
+                requireNetwork = true,
+                delaySeconds = snapshot.cooldownSeconds + 1L,
+            )
+        }
         return Result.success()
     }
 }
@@ -203,7 +214,8 @@ class BuzzGateWidgetWorker(
         val manager = GlanceAppWidgetManager(applicationContext)
         val initialIds = runCatching {
             manager.getGlanceIds(GateQuickWidget::class.java)
-        }.getOrDefault(emptyList())
+        }.onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(emptyList())
         for (glanceId in initialIds) {
             runCatching {
                 updateAppWidgetState(applicationContext, glanceId) { prefs ->
@@ -212,7 +224,7 @@ class BuzzGateWidgetWorker(
                     prefs[GateQuickWidget.KEY_STATUS_TONE] = GateWidgetSnapshot.TONE_WARNING
                 }
                 widget.update(applicationContext, glanceId)
-            }
+            }.onFailure { if (it is CancellationException) throw it }
         }
 
         var refreshed = false
@@ -232,7 +244,8 @@ class BuzzGateWidgetWorker(
 
             val postBuzzIds = runCatching {
                 manager.getGlanceIds(GateQuickWidget::class.java)
-            }.getOrDefault(emptyList())
+            }.onFailure { if (it is CancellationException) throw it }
+                .getOrDefault(emptyList())
             for (glanceId in postBuzzIds) {
                 runCatching {
                     updateAppWidgetState(applicationContext, glanceId) { prefs ->
@@ -241,7 +254,7 @@ class BuzzGateWidgetWorker(
                         prefs[GateQuickWidget.KEY_STATUS_TONE] = tone
                     }
                     widget.update(applicationContext, glanceId)
-                }
+                }.onFailure { if (it is CancellationException) throw it }
             }
 
             // After brief confirmation, refresh live cooldown/status from the server.
@@ -249,12 +262,21 @@ class BuzzGateWidgetWorker(
             val fresh = GateWidgetRepository.fetchSnapshot(app.container.sessionStorage, app.container.api)
             GateWidgetUpdater.writeSnapshotToAll(applicationContext, fresh)
             refreshed = true
+            if (fresh.cooldownSeconds > 0) {
+                GateWidgetUpdater.enqueueSync(
+                    applicationContext,
+                    policy = ExistingWorkPolicy.REPLACE,
+                    requireNetwork = true,
+                    delaySeconds = fresh.cooldownSeconds + 1L,
+                )
+            }
         } finally {
             withContext(NonCancellable) {
                 if (!refreshed) {
                     val cleanupIds = runCatching {
                         manager.getGlanceIds(GateQuickWidget::class.java)
-                    }.getOrDefault(emptyList())
+                    }.onFailure { if (it is CancellationException) throw it }
+                        .getOrDefault(emptyList())
                     for (glanceId in cleanupIds) {
                         runCatching {
                             updateAppWidgetState(applicationContext, glanceId) { prefs ->
@@ -263,7 +285,7 @@ class BuzzGateWidgetWorker(
                                 prefs[GateQuickWidget.KEY_STATUS_TONE] = GateWidgetSnapshot.TONE_NEUTRAL
                             }
                             widget.update(applicationContext, glanceId)
-                        }
+                        }.onFailure { if (it is CancellationException) throw it }
                     }
                 }
             }
@@ -274,7 +296,7 @@ class BuzzGateWidgetWorker(
 
 class RefreshGateWidgetAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
-        GateWidgetUpdater.enqueueSync(context)
+        GateWidgetUpdater.enqueueSync(context, requireNetwork = false)
     }
 }
 

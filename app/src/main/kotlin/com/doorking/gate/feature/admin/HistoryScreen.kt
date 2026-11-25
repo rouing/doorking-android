@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -26,7 +25,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.doorking.gate.core.ui.components.CollapsibleSectionCard
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,7 +46,6 @@ import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PillTone
-import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -221,7 +219,7 @@ fun HistoryScreen(
 
     val users = history?.users.orEmpty()
     val events = history?.events.orEmpty()
-    val visibleEvents = events.take(shown)
+    val visibleEvents = remember(events, shown) { events.take(shown) }
 
     PullToRefreshBox(
         isRefreshing = refreshing,
@@ -336,7 +334,7 @@ fun HistoryScreen(
                 val failed = entry.result == "failed"
                 val hasDetails = entry.details.isNotEmpty()
                 val expanded by remember(entry.id, hasDetails) {
-                    derivedStateOf { hasDetails && expandedEventId == entry.id }
+                    computedStateOf { hasDetails && expandedEventId == entry.id }
                 }
                 BubbleCard(
                     containerColor = if (failed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surfaceContainerLow,

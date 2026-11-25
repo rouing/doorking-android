@@ -12,8 +12,10 @@ import com.doorking.gate.core.network.AuthEventBus
 import com.doorking.gate.core.network.GateInfoDto
 import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.fakes.FakeSessionStorage
+import com.doorking.gate.feature.auth.ParsedInviteLink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -451,6 +453,107 @@ class SessionBootstrapViewModelTest {
                 "Single sign-in session expired. Try again.",
                 SessionBootstrapViewModel.mapSsoErrorMessage("invalid_state"),
             )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun ssoErrorCallbackDoesNotClearPendingVerifierSoRealCodeStillSucceeds() = runTest(testDispatcher) {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            val storage = FakeSessionStorage(initialServerUrl = baseUrl)
+            val events = AuthEventBus()
+            val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, events), "$baseUrl/")
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":false}"""),
+            )
+
+            val vm = SessionBootstrapViewModel(storage, api, events, noopPasskey)
+            awaitBootstrap(vm) { it is BootstrapState.Ready }
+            server.takeRequest() // initial /api/session
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"url":"https://idp.example.com/authorize","nativeVerifier":"v-keep-42"}"""),
+            )
+            assertTrue(vm.startSso(baseUrl, "google").isSuccess)
+            server.takeRequest() // /api/sso/start
+
+            // A spoofed error callback must NOT wipe pendingSsoVerifier.
+            vm.handleSsoCallbackParams(code = null, errParam = "access_denied")
+            assertEquals("Single sign-in was cancelled.", vm.ssoError.value)
+
+            // The real code callback still exchanges successfully using the preserved verifier.
+            val issuedToken = "dks_${"e".repeat(64)}"
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"ok":true,"sessionToken":"$issuedToken"}"""),
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":true,"user":"alice"}"""),
+            )
+            vm.handleSsoCallbackParams(code = "real-code-99", errParam = null)
+            assertNull(vm.ssoError.value)
+            assertEquals(issuedToken, storage.currentSessionToken())
+            val ready = vm.bootstrap.value as BootstrapState.Ready
+            assertEquals("alice", ready.session?.user)
+
+            val exchangeReq = server.takeRequest()
+            assertEquals("/api/sso/native-exchange", exchangeReq.path)
+            val body = exchangeReq.body.readUtf8()
+            assertTrue(body.contains("real-code-99"))
+            assertTrue(body.contains("v-keep-42"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun coldStartInviteWaitsForBootstrapAndPreservesSignedInUser() = runTest(testDispatcher) {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            val storage = FakeSessionStorage(
+                initialServerUrl = baseUrl,
+                initialToken = "dks_${"f".repeat(64)}",
+            )
+            val events = AuthEventBus()
+            val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, events), "$baseUrl/")
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":true,"user":"alice"}"""),
+            )
+
+            val vm = SessionBootstrapViewModel(storage, api, events, noopPasskey)
+            // Initial bootstrap is still Loading while /api/session is in flight.
+            assertEquals(BootstrapState.Loading, vm.bootstrap.value)
+
+            val inviteToken = "i".repeat(32)
+            val inviteJob = launch {
+                vm.handleParsedInvite(ParsedInviteLink("https://invite.example.com", inviteToken))
+            }
+
+            val settled = awaitBootstrap(vm) {
+                it is BootstrapState.Ready && it.startRoute is AppRoute.AcceptInvite
+            } as BootstrapState.Ready
+            inviteJob.join()
+
+            assertEquals(AppRoute.AcceptInvite("https://invite.example.com", inviteToken), settled.startRoute)
+            assertEquals(true, settled.session?.loggedIn)
+            assertEquals("alice", settled.session?.user)
         } finally {
             server.shutdown()
         }

@@ -60,6 +60,7 @@ import com.doorking.gate.DoorkingApp
 import com.doorking.gate.MainActivity
 import com.doorking.gate.R
 import com.doorking.gate.core.network.ApiClientFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -126,8 +127,17 @@ class RelaySingleWidget : GlanceAppWidget() {
         appWidgetId: Int,
         throwable: Throwable,
     ) {
+        val openIntent = PendingIntent.getActivity(
+            context,
+            appWidgetId,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val fallback = RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply {
             setTextViewText(android.R.id.text1, "Tap to open Doorking Gate")
+            setOnClickPendingIntent(android.R.id.text1, openIntent)
         }
         AppWidgetManager.getInstance(context).updateAppWidget(appWidgetId, fallback)
     }
@@ -167,11 +177,14 @@ class RelaySingleWidget : GlanceAppWidget() {
         }
 
         suspend fun clearAll(context: Context) {
-            RelayWidgetPinHelper.clearPendingPins(context)
+            withContext(Dispatchers.IO) {
+                RelayWidgetPinHelper.clearPendingPins(context)
+            }
             val widget = RelaySingleWidget()
             val ids = runCatching {
                 GlanceAppWidgetManager(context).getGlanceIds(RelaySingleWidget::class.java)
-            }.getOrDefault(emptyList())
+            }.onFailure { if (it is CancellationException) throw it }
+                .getOrDefault(emptyList())
             for (glanceId in ids) {
                 runCatching {
                     updateAppWidgetState(context, glanceId) { prefs ->
@@ -185,7 +198,7 @@ class RelaySingleWidget : GlanceAppWidget() {
                         prefs[KEY_IS_ERROR] = false
                     }
                     widget.update(context, glanceId)
-                }
+                }.onFailure { if (it is CancellationException) throw it }
             }
         }
     }
@@ -266,7 +279,8 @@ class BuzzSingleRelayAction : ActionCallback {
     ) {
         val appWidgetId = runCatching {
             GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
-        }.getOrDefault(AppWidgetManager.INVALID_APPWIDGET_ID)
+        }.onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(AppWidgetManager.INVALID_APPWIDGET_ID)
         val phone = parameters[KEY_PHONE].orEmpty()
         val relay = parameters[KEY_RELAY] ?: 0
         val relayName = parameters[KEY_RELAY_NAME].orEmpty().ifBlank { "Gate" }
@@ -320,7 +334,9 @@ class BuzzSingleRelayWorker(
         }
 
         val manager = GlanceAppWidgetManager(applicationContext)
-        val initialGlanceId = runCatching { manager.getGlanceIdBy(appWidgetId) }.getOrNull() ?: return Result.failure()
+        val initialGlanceId = runCatching { manager.getGlanceIdBy(appWidgetId) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull() ?: return Result.failure()
         val widget = RelaySingleWidget()
 
         runCatching {
@@ -330,7 +346,7 @@ class BuzzSingleRelayWorker(
                 prefs[RelaySingleWidget.KEY_STATUS] = "Opening…"
             }
             widget.update(applicationContext, initialGlanceId)
-        }
+        }.onFailure { if (it is CancellationException) throw it }
 
         try {
             val outcome = GateWidgetRepository.buzz(
@@ -353,7 +369,7 @@ class BuzzSingleRelayWorker(
                     prefs[RelaySingleWidget.KEY_STATUS] = statusText
                 }
                 widget.update(applicationContext, postBuzzId)
-            }
+            }.onFailure { if (it is CancellationException) throw it }
 
             delay(4_000L)
         } finally {
@@ -366,7 +382,7 @@ class BuzzSingleRelayWorker(
                         prefs[RelaySingleWidget.KEY_STATUS] = ""
                     }
                     widget.update(applicationContext, resetId)
-                }
+                }.onFailure { if (it is CancellationException) throw it }
             }
         }
         return Result.success()
@@ -399,7 +415,7 @@ object RelayWidgetPinHelper {
     fun canPin(context: Context): Boolean =
         runCatching { AppWidgetManager.getInstance(context).isRequestPinAppWidgetSupported }.getOrDefault(false)
 
-    fun requestPin(
+    suspend fun requestPin(
         context: Context,
         gatePhone: String,
         gateName: String,
@@ -407,8 +423,12 @@ object RelayWidgetPinHelper {
         relayName: String,
         unitCode: String?,
     ): Boolean {
-        val manager = runCatching { AppWidgetManager.getInstance(context) }.getOrNull() ?: return false
-        val supported = runCatching { manager.isRequestPinAppWidgetSupported }.getOrDefault(false)
+        val manager = runCatching { AppWidgetManager.getInstance(context) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull() ?: return false
+        val supported = runCatching { manager.isRequestPinAppWidgetSupported }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(false)
         if (!supported) return false
 
         val token = UUID.randomUUID().toString()
@@ -419,7 +439,9 @@ object RelayWidgetPinHelper {
             relayName = relayName,
             unitCode = unitCode?.ifBlank { null },
         )
-        storePendingPin(context, token, config)
+        withContext(Dispatchers.IO) {
+            storePendingPin(context, token, config)
+        }
 
         val provider = ComponentName(context, RelaySingleWidgetReceiver::class.java)
         val callbackIntent = Intent(context, RelayWidgetPinCallbackReceiver::class.java).apply {
@@ -440,11 +462,16 @@ object RelayWidgetPinHelper {
                 },
             )
         }
-        val requested = runCatching {
-            manager.requestPinAppWidget(provider, extras, pi)
-        }.getOrDefault(false)
+        val requested = withContext(Dispatchers.Main.immediate) {
+            runCatching {
+                manager.requestPinAppWidget(provider, extras, pi)
+            }.onFailure { if (it is CancellationException) throw it }
+                .getOrDefault(false)
+        }
         if (!requested) {
-            removePendingPin(context, token)
+            withContext(Dispatchers.IO + NonCancellable) {
+                removePendingPin(context, token)
+            }
         }
         return requested
     }
@@ -501,26 +528,34 @@ object RelayWidgetPinHelper {
 class RelayWidgetPinCallbackReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_PINNED) return
-        val appWidgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        val appWidgetId = runCatching {
+            intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        }.getOrDefault(AppWidgetManager.INVALID_APPWIDGET_ID)
         if (appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return
 
-        val expectedProvider = ComponentName(context, RelaySingleWidgetReceiver::class.java)
-        val actualProvider = runCatching {
-            AppWidgetManager.getInstance(context).getAppWidgetInfo(appWidgetId)?.provider
-        }.getOrNull()
-        if (actualProvider != expectedProvider) return
+        val pinToken = runCatching {
+            intent.getStringExtra(EXTRA_PIN_TOKEN)
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return
 
-        val token = intent.getStringExtra(EXTRA_PIN_TOKEN)?.takeIf { it.isNotBlank() } ?: return
-        val config = RelayWidgetPinHelper.consumePendingPin(context, token) ?: return
-        if (config.gatePhone.isBlank()) return
-
+        val appContext = context.applicationContext
+        val expectedProvider = ComponentName(appContext, RelaySingleWidgetReceiver::class.java)
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 runCatching {
                     withTimeout(8_000L) {
+                        val actualProvider = runCatching {
+                            AppWidgetManager.getInstance(appContext).getAppWidgetInfo(appWidgetId)?.provider
+                        }.onFailure { if (it is CancellationException) throw it }
+                            .getOrNull()
+                        if (actualProvider != expectedProvider) return@withTimeout
+
+                        val config = RelayWidgetPinHelper.consumePendingPin(appContext, pinToken)
+                            ?: return@withTimeout
+                        if (config.gatePhone.isBlank()) return@withTimeout
+
                         RelaySingleWidget.configureWidget(
-                            context = context.applicationContext,
+                            context = appContext,
                             appWidgetId = appWidgetId,
                             gatePhone = config.gatePhone,
                             gateName = config.gateName,
@@ -529,7 +564,7 @@ class RelayWidgetPinCallbackReceiver : BroadcastReceiver() {
                             unitCode = config.unitCode?.ifBlank { null },
                         )
                     }
-                }
+                }.onFailure { if (it is CancellationException) throw it }
             } finally {
                 pending.finish()
             }

@@ -1,8 +1,9 @@
 package com.doorking.gate.core.media
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.os.Trace
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,11 +37,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -60,9 +65,11 @@ import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 private const val MAX_MJPEG_FRAME_BYTES = 4 * 1024 * 1024
 private const val MAX_DECODE_DIMENSION_PX = 1280
+private const val MIN_FRAME_INTERVAL_MS = 40L
 
 /**
  * Live MJPEG camera viewer backed by `GET /api/gates/{phone}/cameras/live/{channel}`.
@@ -117,9 +124,15 @@ fun LiveCameraDialog(
                             connecting = false
                             return@withContext
                         }
+                        var lastFrameMs = Long.MIN_VALUE
                         readMjpegFrames(stream) { bytes, length ->
+                            val now = SystemClock.elapsedRealtime()
+                            if (lastFrameMs != Long.MIN_VALUE && now - lastFrameMs < MIN_FRAME_INTERVAL_MS) {
+                                return@readMjpegFrames isActive
+                            }
                             val imageBitmap = decodeDownsampledImageBitmap(bytes, length)
                             if (imageBitmap != null) {
+                                lastFrameMs = now
                                 currentFrame = imageBitmap
                                 connecting = false
                             }
@@ -138,6 +151,7 @@ fun LiveCameraDialog(
             } finally {
                 cancelHandle.dispose()
                 call.cancel()
+                currentFrame = null
             }
         }
     }
@@ -262,15 +276,28 @@ private fun LiveFrameImage(
     frameProvider: () -> ImageBitmap?,
     modifier: Modifier = Modifier,
 ) {
-    val frame = frameProvider()
-    if (frame != null) {
-        Image(
-            bitmap = frame,
-            contentDescription = "Live gate camera feed",
-            contentScale = ContentScale.Fit,
-            modifier = modifier,
-        )
-    }
+    Box(
+        modifier = modifier
+            .semantics { contentDescription = "Live gate camera feed" }
+            .drawBehind {
+                val frame = frameProvider() ?: return@drawBehind
+                val srcW = frame.width
+                val srcH = frame.height
+                val canvasW = size.width
+                val canvasH = size.height
+                if (srcW <= 0 || srcH <= 0 || canvasW <= 0f || canvasH <= 0f) return@drawBehind
+                val scale = minOf(canvasW / srcW.toFloat(), canvasH / srcH.toFloat())
+                val dstW = (srcW * scale).roundToInt().coerceAtLeast(1)
+                val dstH = (srcH * scale).roundToInt().coerceAtLeast(1)
+                val dstX = ((canvasW - dstW) / 2f).roundToInt()
+                val dstY = ((canvasH - dstH) / 2f).roundToInt()
+                drawImage(
+                    image = frame,
+                    dstOffset = IntOffset(dstX, dstY),
+                    dstSize = IntSize(dstW, dstH),
+                )
+            },
+    )
 }
 
 private class AccessibleByteArrayOutputStream(initialSize: Int) : ByteArrayOutputStream(initialSize) {
@@ -297,6 +324,7 @@ private fun decodeDownsampledImageBitmap(
         }
         val decodeOpts = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
         }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, length, decodeOpts) ?: return null
         bmp.asImageBitmap()

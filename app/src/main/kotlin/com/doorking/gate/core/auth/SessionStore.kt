@@ -1,9 +1,12 @@
 package com.doorking.gate.core.auth
 
 import android.content.Context
+import coil3.SingletonImageLoader
 import com.doorking.gate.BuildConfig
 import com.doorking.gate.core.media.PdfShareHelper
 import com.doorking.gate.tile.GateRelayTileManager
+import com.doorking.gate.widget.GateWidgetSnapshot
+import com.doorking.gate.widget.GateWidgetUpdater
 import com.doorking.gate.widget.RelaySingleWidget
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -36,6 +39,7 @@ data class StoredAuthState(
     val loaded: Boolean = false,
     val tokenServerOrigin: String? = null,
     val crashlyticsEnabled: Boolean = false,
+    val pushOptIn: Boolean = false,
 )
 
 /**
@@ -55,6 +59,7 @@ interface SessionStorage {
     suspend fun setBiometricLockEnabled(enabled: Boolean)
     suspend fun setBiometricKeyId(keyId: String?)
     suspend fun setCrashlyticsEnabled(enabled: Boolean) {}
+    suspend fun setPushOptIn(enabled: Boolean) {}
 }
 
 fun normalizeServerUrl(raw: String): String {
@@ -82,11 +87,26 @@ class EncryptedSessionStore(
     private val _state = MutableStateFlow(StoredAuthState())
     override val state: StateFlow<StoredAuthState> = _state.asStateFlow()
 
+    @Volatile
+    private var cachedDecryptedToken: Pair<String, String>? = null
+
     init {
         scope.launch {
             dataStore.data.collect { prefs ->
                 val encrypted = prefs[KEY_SESSION_TOKEN]
-                val decrypted = encrypted?.let(cipher::decrypt)
+                val decrypted = if (encrypted == null) {
+                    cachedDecryptedToken = null
+                    null
+                } else {
+                    val cached = cachedDecryptedToken
+                    if (cached != null && cached.first == encrypted) {
+                        cached.second
+                    } else {
+                        cipher.decrypt(encrypted)?.also { plain ->
+                            cachedDecryptedToken = encrypted to plain
+                        }
+                    }
+                }
                 val server = normalizeServerUrl(prefs[KEY_SERVER_URL] ?: DEFAULT_SERVER_URL)
                 val mode = prefs[KEY_THEME_MODE]?.let { name ->
                     ThemeMode.entries.firstOrNull { it.name == name }
@@ -101,6 +121,7 @@ class EncryptedSessionStore(
                     loaded = true,
                     tokenServerOrigin = prefs[KEY_TOKEN_SERVER_ORIGIN],
                     crashlyticsEnabled = prefs[KEY_CRASHLYTICS_ENABLED] == true,
+                    pushOptIn = prefs[KEY_PUSH_OPT_IN] == true,
                 )
             }
         }
@@ -114,6 +135,7 @@ class EncryptedSessionStore(
 
     override suspend fun saveSessionToken(token: String) {
         val encrypted = withContext(Dispatchers.IO) { cipher.encrypt(token) }
+        cachedDecryptedToken = encrypted to token
         val origin = serverOriginOf(_state.value.serverUrl)
         dataStore.edit {
             it[KEY_SESSION_TOKEN] = encrypted
@@ -127,12 +149,14 @@ class EncryptedSessionStore(
     }
 
     override suspend fun clearSessionToken() {
+        cachedDecryptedToken = null
         dataStore.edit {
             it.remove(KEY_SESSION_TOKEN)
             it.remove(KEY_TOKEN_SERVER_ORIGIN)
             it.remove(KEY_LAST_GATE)
             it.remove(KEY_BIOMETRIC_LOCK)
             it.remove(KEY_BIOMETRIC_KEY_ID)
+            it.remove(KEY_PUSH_OPT_IN)
         }
         _state.value = _state.value.copy(
             sessionToken = null,
@@ -140,13 +164,20 @@ class EncryptedSessionStore(
             lastGatePhone = null,
             biometricLockEnabled = false,
             biometricKeyId = null,
+            pushOptIn = false,
             loaded = true,
         )
         withContext(Dispatchers.IO) {
             runCatching { BiometricKeyManager.deleteLocalKey() }
+            runCatching { GateWidgetUpdater.writeSnapshotToAll(appContext, GateWidgetSnapshot()) }
             runCatching { GateRelayTileManager.clearAll(appContext) }
             runCatching { RelaySingleWidget.clearAll(appContext) }
             runCatching { PdfShareHelper.clearExports(appContext) }
+            runCatching {
+                val loader = SingletonImageLoader.get(appContext)
+                loader.memoryCache?.clear()
+                loader.diskCache?.clear()
+            }
         }
     }
 
@@ -185,6 +216,11 @@ class EncryptedSessionStore(
         _state.value = _state.value.copy(crashlyticsEnabled = enabled)
     }
 
+    override suspend fun setPushOptIn(enabled: Boolean) {
+        dataStore.edit { it[KEY_PUSH_OPT_IN] = enabled }
+        _state.value = _state.value.copy(pushOptIn = enabled)
+    }
+
     private companion object {
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_TOKEN = stringPreferencesKey("session_token_enc")
@@ -194,5 +230,6 @@ class EncryptedSessionStore(
         val KEY_BIOMETRIC_LOCK = booleanPreferencesKey("biometric_lock_enabled")
         val KEY_BIOMETRIC_KEY_ID = stringPreferencesKey("biometric_key_id")
         val KEY_CRASHLYTICS_ENABLED = booleanPreferencesKey("crashlytics_enabled")
+        val KEY_PUSH_OPT_IN = booleanPreferencesKey("push_opt_in")
     }
 }

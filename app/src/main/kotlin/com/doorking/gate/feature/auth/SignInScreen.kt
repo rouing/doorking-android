@@ -2,6 +2,7 @@ package com.doorking.gate.feature.auth
 
 import android.content.Context
 import android.net.Uri
+import androidx.activity.compose.ReportDrawn
 import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
@@ -88,7 +89,7 @@ fun isValidExternalBrowserUrl(
     return scheme == "https" || (allowLocalHttp && scheme == "http" && isLocal)
 }
 
-private fun launchPinnedCustomTab(context: Context, url: String) {
+fun launchPinnedCustomTab(context: Context, url: String) {
     val customTabsPkg = CustomTabsClient.getPackageName(context, null)
     val tabsIntent = CustomTabsIntent.Builder().build().apply {
         if (!customTabsPkg.isNullOrBlank()) {
@@ -114,6 +115,7 @@ fun SignInScreen(
         Result.success(GoogleSsoOutcome.FallbackToBrowser)
     },
 ) {
+    ReportDrawn()
     var serverUrl by remember(initialServerUrl) { mutableStateOf(initialServerUrl) }
     var serverInfo by remember(initialSessionInfo) { mutableStateOf(initialSessionInfo) }
     var showServerEditor by remember { mutableStateOf(false) }

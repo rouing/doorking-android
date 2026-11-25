@@ -1,7 +1,9 @@
 package com.doorking.gate.widget
 
+import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.Context
+import android.content.Intent
 import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -89,8 +91,17 @@ class GateQuickWidget : GlanceAppWidget() {
         appWidgetId: Int,
         throwable: Throwable,
     ) {
+        val openIntent = PendingIntent.getActivity(
+            context,
+            appWidgetId,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val fallback = RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply {
             setTextViewText(android.R.id.text1, "Tap to open Doorking Gate")
+            setOnClickPendingIntent(android.R.id.text1, openIntent)
         }
         AppWidgetManager.getInstance(context).updateAppWidget(appWidgetId, fallback)
     }

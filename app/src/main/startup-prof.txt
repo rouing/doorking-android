@@ -1,0 +1,44 @@
+# Startup Profile rules for DoorKing Gate Manager (com.doorking.gate)
+# Enables R8 DEX startup layout optimization for cold-start classes and methods only.
+
+# Cold-start bootstrap
+Lcom/doorking/gate/DoorkingApp;
+HSPLcom/doorking/gate/DoorkingApp;->**(**)**
+Lcom/doorking/gate/DoorkingApp$*;
+HSPLcom/doorking/gate/DoorkingApp$*;->**(**)**
+Lcom/doorking/gate/AppContainer;
+HSPLcom/doorking/gate/AppContainer;->**(**)**
+Lcom/doorking/gate/AppContainer$*;
+HSPLcom/doorking/gate/AppContainer$*;->**(**)**
+Lcom/doorking/gate/MainActivity;
+HSPLcom/doorking/gate/MainActivity;->**(**)**
+Lcom/doorking/gate/MainActivity$*;
+HSPLcom/doorking/gate/MainActivity$*;->**(**)**
+Lcom/doorking/gate/MainActivityKt;
+HSPLcom/doorking/gate/MainActivityKt;->**(**)**
+Lcom/doorking/gate/MainActivityKt$*;
+HSPLcom/doorking/gate/MainActivityKt$*;->**(**)**
+
+# Cold-start session store & keystore cipher
+Lcom/doorking/gate/core/auth/SessionStore*;
+HSPLcom/doorking/gate/core/auth/SessionStore*;->**(**)**
+Lcom/doorking/gate/core/auth/SessionStorage*;
+HSPLcom/doorking/gate/core/auth/SessionStorage*;->**(**)**
+Lcom/doorking/gate/core/auth/EncryptedSessionStore*;
+HSPLcom/doorking/gate/core/auth/EncryptedSessionStore*;->**(**)**
+Lcom/doorking/gate/core/auth/StoredAuthState*;
+HSPLcom/doorking/gate/core/auth/StoredAuthState*;->**(**)**
+Lcom/doorking/gate/core/auth/ThemeMode*;
+HSPLcom/doorking/gate/core/auth/ThemeMode*;->**(**)**
+Lcom/doorking/gate/core/auth/CryptoBox*;
+HSPLcom/doorking/gate/core/auth/CryptoBox*;->**(**)**
+Lcom/doorking/gate/core/auth/TokenCipher*;
+HSPLcom/doorking/gate/core/auth/TokenCipher*;->**(**)**
+Lcom/doorking/gate/core/auth/KeystoreTokenCipher*;
+HSPLcom/doorking/gate/core/auth/KeystoreTokenCipher*;->**(**)**
+
+# Cold-start theming & navigation
+Lcom/doorking/gate/core/ui/theme/**;
+HSPLcom/doorking/gate/core/ui/theme/**->**(**)**
+Lcom/doorking/gate/navigation/**;
+HSPLcom/doorking/gate/navigation/**->**(**)**

@@ -1,5 +1,6 @@
 package com.doorking.gate.feature.staff
 
+import androidx.lifecycle.viewModelScope
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
 import com.doorking.gate.core.network.JobDto
@@ -9,6 +10,7 @@ import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -34,6 +36,7 @@ class StaffGateViewModelTest {
 
     private lateinit var server: MockWebServer
     private val mainThread = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+    private val activeViewModels = mutableListOf<StaffGateViewModel>()
 
     @Before
     fun setUp() {
@@ -44,6 +47,8 @@ class StaffGateViewModelTest {
 
     @After
     fun tearDown() {
+        activeViewModels.forEach { it.viewModelScope.cancel() }
+        activeViewModels.clear()
         server.shutdown()
         Dispatchers.resetMain()
         mainThread.close()
@@ -89,10 +94,11 @@ class StaffGateViewModelTest {
             baseUrl = "$baseUrl/",
         )
 
-        val vm = StaffGateViewModel("2145550100", api, storage, pollIntervalMs = 20L)
+        val vm = StaffGateViewModel("2145550100", api, storage, pollIntervalMs = 20L).also { activeViewModels += it }
         val loaded = withTimeout(5_000) { vm.uiState.first { !it.loading } }
         assertEquals(1, loaded.residentsReply?.rows?.size)
         assertEquals(1, loaded.transactions.size)
+        assertEquals(1, loaded.visibleTransactions.size)
         assertEquals("Main Gate", loaded.prefs.relayLabels["0"])
 
         vm.loadSendPreview()
@@ -235,7 +241,7 @@ class StaffGateViewModelTest {
             baseUrl = "$baseUrl/",
         )
 
-        val vm = StaffGateViewModel("2145550100", api, storage, pollIntervalMs = 15L, snapPollIntervalMs = 15L)
+        val vm = StaffGateViewModel("2145550100", api, storage, pollIntervalMs = 15L, snapPollIntervalMs = 15L).also { activeViewModels += it }
         withTimeout(5_000) { vm.uiState.first { !it.loading && it.job?.state == "running" } }
 
         vm.setActive(false)
@@ -248,5 +254,151 @@ class StaffGateViewModelTest {
         val errored = withTimeout(5_000) { vm.uiState.first { it.error != null } }
         assertNotNull(errored.error)
         assertTrue(errored.error!!.contains("Lost connection"))
+    }
+
+    @Test
+    fun throttlesIdleResumeJobRefreshToMinimumInterval() = runBlocking {
+        val jobCalls = AtomicInteger(0)
+        val snapCalls = AtomicInteger(0)
+        var nowMs = 10_000L
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/gates/2145550100/residents" -> json(
+                    200,
+                    """{"rows":[],"cache":{"exists":true,"edited":false,"conflicts":[]}}""",
+                )
+                request.path!!.startsWith("/api/gates/2145550100/data") -> json(
+                    200,
+                    """{"transactions":{"updated":"2026-11-22T00:00:00Z","rows":[],"next":null}}""",
+                )
+                request.path == "/api/gates/2145550100/prefs" -> json(200, """{}""")
+                request.path == "/api/gates/2145550100/cameras" -> json(
+                    200,
+                    """{"settings":{"enabled":true,"mode":"video","channels":[]}}""",
+                )
+                request.path == "/api/gates/2145550100/snapshots" -> {
+                    snapCalls.incrementAndGet()
+                    json(200, """{"snapshots":{}}""")
+                }
+                request.path == "/api/gates/2145550100/job" -> {
+                    jobCalls.incrementAndGet()
+                    json(200, """{"state":"idle","log":[]}""")
+                }
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"6".repeat(64)}")
+        val api = ApiClientFactory.createApi(
+            ApiClientFactory.createOkHttp(storage, AuthEventBus()),
+            baseUrl = "$baseUrl/",
+        )
+
+        val vm = StaffGateViewModel(
+            gatePhone = "2145550100",
+            api = api,
+            sessionStorage = storage,
+            resumeRefreshMinIntervalMs = 15_000L,
+            clockMs = { nowMs },
+        ).also { activeViewModels += it }
+        withTimeout(5_000) { vm.uiState.first { !it.loading } }
+        val jobsAfterLoad = jobCalls.get()
+        val snapsAfterLoad = snapCalls.get()
+
+        // Resuming within 15s while idle must be throttled.
+        vm.setActive(false)
+        nowMs += 5_000L
+        vm.setActive(true)
+        delay(80L)
+        assertEquals(jobsAfterLoad, jobCalls.get())
+        assertEquals(snapsAfterLoad, snapCalls.get())
+
+        // Resuming once >= 15s has elapsed refreshes /job and /snapshots once.
+        vm.setActive(false)
+        nowMs += 10_000L
+        vm.setActive(true)
+        withTimeout(5_000) {
+            while (jobCalls.get() <= jobsAfterLoad || snapCalls.get() <= snapsAfterLoad) delay(10L)
+        }
+        assertEquals(jobsAfterLoad + 1, jobCalls.get())
+        assertEquals(snapsAfterLoad + 1, snapCalls.get())
+
+        // Another quick pause/resume resets the 15s throttle window.
+        vm.setActive(false)
+        nowMs += 2_000L
+        vm.setActive(true)
+        delay(80L)
+        assertEquals(jobsAfterLoad + 1, jobCalls.get())
+        assertEquals(snapsAfterLoad + 1, snapCalls.get())
+    }
+
+    @Test
+    fun precomputesVisibleTransactionsOnLoadAndPagination() = runBlocking {
+        val baseTs = 1795542936000L
+        val olderTs = baseTs - 300_000L
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/gates/2145550100/residents" -> json(
+                    200,
+                    """{"rows":[],"cache":{"exists":true,"edited":false,"conflicts":[]}}""",
+                )
+                request.path == "/api/gates/2145550100/data" -> json(
+                    200,
+                    """
+                    {
+                      "transactions":{
+                        "updated":"2026-11-24T12:00:00Z",
+                        "rows":[
+                          {"ts":$baseTs,"minute":"20261124-1155","date":"11/24","time":"11:55","eventType":"Portal Open","access":"Admit","name":"Cody","directoryCode":"701","relay":"Entry","source":"portal"},
+                          {"ts":${baseTs - 20_000L},"minute":"20261124-1155","date":"11/24","time":"11:55","eventType":"Hold End","access":"Rels","relay":"Entry"},
+                          {"ts":${baseTs - 20_000L},"minute":"20261124-1155","date":"11/24","time":"11:55","eventType":"Hold Begin","access":"Hold","relay":"Entry"},
+                          {"ts":${baseTs - 60_000L},"minute":"20261124-1154","date":"11/24","time":"11:54","eventType":"Entry Code","access":"Admit","name":"Alice","directoryCode":"101"}
+                        ],
+                        "next":$olderTs
+                      }
+                    }
+                    """.trimIndent(),
+                )
+                request.path!!.startsWith("/api/gates/2145550100/data?before=") -> json(
+                    200,
+                    """
+                    {
+                      "transactions":{
+                        "updated":"2026-11-24T12:00:00Z",
+                        "rows":[
+                          {"ts":$olderTs,"minute":"20261124-1150","date":"11/24","time":"11:50","eventType":"Portal Open","access":"Admit","name":"Bob","directoryCode":"202","relay":"Entry","source":"portal"},
+                          {"ts":${olderTs - 15_000L},"minute":"20261124-1150","date":"11/24","time":"11:50","eventType":"Hold End","access":"Rels","relay":"Entry"},
+                          {"ts":${olderTs - 15_000L},"minute":"20261124-1150","date":"11/24","time":"11:50","eventType":"Hold Begin","access":"Hold","relay":"Entry"}
+                        ],
+                        "next":null
+                      }
+                    }
+                    """.trimIndent(),
+                )
+                request.path == "/api/gates/2145550100/prefs" -> json(200, """{}""")
+                request.path == "/api/gates/2145550100/cameras" -> json(200, """{"settings":null}""")
+                request.path == "/api/gates/2145550100/snapshots" -> json(200, """{"snapshots":{}}""")
+                request.path == "/api/gates/2145550100/job" -> json(200, """{"state":"idle","log":[]}""")
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"7".repeat(64)}")
+        val api = ApiClientFactory.createApi(
+            ApiClientFactory.createOkHttp(storage, AuthEventBus()),
+            baseUrl = "$baseUrl/",
+        )
+
+        val vm = StaffGateViewModel("2145550100", api, storage).also { activeViewModels += it }
+        val loaded = withTimeout(5_000) { vm.uiState.first { !it.loading } }
+        assertEquals(4, loaded.transactions.size)
+        assertEquals(2, loaded.visibleTransactions.size)
+
+        vm.loadOlderTransactions()
+        val paginated = withTimeout(5_000) { vm.uiState.first { it.txNextBefore == null && !it.loadingOlderTx } }
+        assertEquals(7, paginated.transactions.size)
+        assertEquals(3, paginated.visibleTransactions.size)
     }
 }

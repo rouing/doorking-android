@@ -337,4 +337,13 @@ class CarGateRepositoryTest {
         assertEquals("Passkey on phone", refreshed.relays.single().statusText)
         assertFalse(refreshed.relays.single().canBuzz)
     }
+
+    @Test
+    fun carScreenUsesReducedIdlePollingAndCapsErrorRetries() {
+        assertEquals(45_000L, ResidentGateCarScreen.IDLE_POLL_MS)
+        assertEquals(5, ResidentGateCarScreen.MAX_POLL_ERRORS)
+        assertFalse(ResidentGateCarScreen.shouldStopErrorPolling(0))
+        assertFalse(ResidentGateCarScreen.shouldStopErrorPolling(4))
+        assertTrue(ResidentGateCarScreen.shouldStopErrorPolling(5))
+    }
 }

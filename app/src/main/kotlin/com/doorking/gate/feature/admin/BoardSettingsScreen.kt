@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,7 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -158,6 +157,14 @@ private val FACTORY_DISPLAY_DEFAULTS = mapOf(
 private val WHITESPACE_REGEX = Regex("\\s+")
 private val SECURITY_TIME_ZONES = listOf(1, 2, 3, 4)
 private val HOLD_OPEN_LABELS = listOf("1", "2", "3", "4", "5", "6", "7", "Hol")
+private val CLEARABLE_BOARD_SECTIONS = setOf(
+    BoardSection.Facility,
+    BoardSection.Holidays,
+    BoardSection.HoldOpen,
+)
+private val NO_BOARD_SEGMENT_BORDER = BorderStroke(0.dp, Color.Transparent)
+private val APB_MODE_OPTIONS = listOf("Off", "Passive", "Active", "Trap")
+private val APB_COUNTER_OPTIONS = listOf("Off", "15 Mins", "30 Mins", "Hour")
 
 private fun isCustomizedDisplayField(field: GateSettingRowDto): Boolean {
     val norm = field.value.trim().lowercase().replace(WHITESPACE_REGEX, " ")
@@ -379,22 +386,17 @@ fun BoardSettingsScreen(
     val unsavedCount = edits.size
     val latestSaveDraft by rememberUpdatedState(saveDraft)
     val latestDiscardDraft by rememberUpdatedState(discardDraft)
-    val lastReportedDraftKey = remember(gatePhone) { arrayOfNulls<Pair<Int, Boolean>>(1) }
-    SideEffect {
-        val nextKey = unsavedCount to readOnly
-        if (lastReportedDraftKey[0] != nextKey) {
-            lastReportedDraftKey[0] = nextKey
-            if (readOnly) {
-                onDraftChange(null)
-            } else {
-                onDraftChange(
-                    SettingsDraftActions(
-                        unsavedCount = unsavedCount,
-                        save = { latestSaveDraft() },
-                        discard = { latestDiscardDraft() },
-                    ),
-                )
-            }
+    SideEffect(gatePhone, unsavedCount, readOnly) {
+        if (readOnly) {
+            onDraftChange(null)
+        } else {
+            onDraftChange(
+                SettingsDraftActions(
+                    unsavedCount = unsavedCount,
+                    save = { latestSaveDraft() },
+                    discard = { latestDiscardDraft() },
+                ),
+            )
         }
     }
     DisposableEffect(Unit) {
@@ -415,6 +417,24 @@ fun BoardSettingsScreen(
     val facilityToggleField = remember(fields) { fields.firstOrNull { it.key == "facilityEnabled" } }
     val facilityEnabled = facilityToggleField?.let { current(it) == "Yes" } ?: false
     val holidaysForSecurityField = remember(fields) { fields.firstOrNull { it.key == "holidaysForSecurity" } }
+    val apbModeField = remember(byKey) { byKey["apbMode"] }
+    val apbOn = section == BoardSection.Apb && apbModeField != null && current(apbModeField) != "Off"
+    val apbResyncAllField = remember(byKey) { byKey["apbResyncAll"] }
+    val resyncAllOn = section == BoardSection.Apb && apbResyncAllField != null && current(apbResyncAllField) == "Yes"
+    val visibleApbFields = remember(section, sectionFields, apbOn, resyncAllOn) {
+        if (section != BoardSection.Apb) {
+            emptyList()
+        } else {
+            sectionFields.filter { setting ->
+                when (setting.key) {
+                    "apbMode" -> true
+                    "apbScheduleDays", "apbScheduleTime" -> false // rendered inside combined apbScheduleEnabled card
+                    "apbResyncList" -> apbOn && resyncAllOn
+                    else -> apbOn
+                }
+            }
+        }
+    }
 
     fun clearTarget(f: GateSettingRowDto): String? = when (section) {
         BoardSection.Facility -> if (f.key == "facilityEnabled") "No" else ""
@@ -427,9 +447,9 @@ fun BoardSettingsScreen(
         else -> null
     }
 
-    val supportsClear = section in setOf(BoardSection.Facility, BoardSection.Holidays, BoardSection.HoldOpen)
+    val supportsClear = section in CLEARABLE_BOARD_SECTIONS
     val canClear by remember(sectionFields, section, readOnly) {
-        derivedStateOf {
+        computedStateOf {
             !readOnly && supportsClear && sectionFields.any { f ->
                 val cleared = clearTarget(f)
                 cleared != null && (edits[f.key] ?: f.value) != cleared
@@ -524,8 +544,9 @@ fun BoardSettingsScreen(
                     BoardSection.Facility -> {
                         if (facilityEnabled) {
                             items(codeFields, key = { it.key }, contentType = { "facility_code" }) { setting ->
-                                val cur = current(setting)
-                                val dirty = setting.key in edits
+                                val edited = edits[setting.key]
+                                val dirty = edited != null
+                                val cur = edited ?: setting.value
                                 val pending = setting.value != setting.gate
                                 val (pillText, pillTone) = when {
                                     dirty -> "Unsaved" to PillTone.Primary
@@ -607,8 +628,9 @@ fun BoardSettingsScreen(
                             }
                         }
                         itemsIndexed(holFields, key = { _, setting -> setting.key }, contentType = { _, _ -> "holiday_row" }) { idx, setting ->
-                            val cur = current(setting)
-                            val dirty = setting.key in edits
+                            val edited = edits[setting.key]
+                            val dirty = edited != null
+                            val cur = edited ?: setting.value
                             val pending = setting.value != setting.gate
                             val (pillText, pillTone) = when {
                                 dirty -> "Unsaved" to PillTone.Primary
@@ -688,10 +710,17 @@ fun BoardSettingsScreen(
                             val relays = byKey["sec${securityLevel}tz${tz}Relays"]
                             if (begin != null && end != null && days != null && relays != null) {
                                 val tzLabel = if (tz == 4 && holOn) "HOL" else "TZ$tz"
-                                val tzFields = listOf(begin, end, days, relays)
-                                val dirty = tzFields.any { it.key in edits }
-                                val pending = tzFields.any { it.value != it.gate }
-                                val active = current(begin).isNotBlank() || current(end).isNotBlank()
+                                val beginEdited = edits[begin.key]
+                                val endEdited = edits[end.key]
+                                val daysEdited = edits[days.key]
+                                val relaysEdited = edits[relays.key]
+                                val beginVal = beginEdited ?: begin.value
+                                val endVal = endEdited ?: end.value
+                                val daysVal = daysEdited ?: days.value
+                                val relaysBits = relaysEdited ?: relays.value
+                                val dirty = beginEdited != null || endEdited != null || daysEdited != null || relaysEdited != null
+                                val pending = begin.value != begin.gate || end.value != end.gate || days.value != days.gate || relays.value != relays.gate
+                                val active = beginVal.isNotBlank() || endVal.isNotBlank()
                                 val (pillText, pillTone) = when {
                                     dirty -> "Unsaved" to PillTone.Primary
                                     pending -> "Not sent" to PillTone.Success
@@ -714,21 +743,21 @@ fun BoardSettingsScreen(
                                     ) {
                                         TimePickerField(
                                             label = "Start",
-                                            value = current(begin),
+                                            value = beginVal,
                                             onValueChange = { edit(begin, it) },
                                             enabled = !readOnly,
                                             modifier = Modifier.weight(1f),
                                         )
                                         TimePickerField(
                                             label = "End",
-                                            value = current(end),
+                                            value = endVal,
                                             onValueChange = { edit(end, it) },
                                             enabled = !readOnly,
                                             modifier = Modifier.weight(1f),
                                         )
                                     }
                                     WeekdayToggleRow(
-                                        bits = current(days),
+                                        bits = daysVal,
                                         enabled = !readOnly,
                                         labelPrefix = tzLabel,
                                         onToggle = { d -> edit(days, toggleBitString(current(days), d, 7)) },
@@ -744,7 +773,7 @@ fun BoardSettingsScreen(
                                             verticalArrangement = Arrangement.spacedBy(6.dp),
                                         ) {
                                             availableRelays.forEach { r ->
-                                                val on = current(relays).getOrNull(r) == '1'
+                                                val on = relaysBits.getOrNull(r) == '1'
                                                 val rName = relayDisplayName(relayLabels, r)
                                                 FilterChip(
                                                     selected = on,
@@ -767,7 +796,9 @@ fun BoardSettingsScreen(
                             val end = byKey["holdOpen${lbl}End"]
                             val days = byKey["holdOpen${lbl}Days"]
                             if (begin != null && end != null && days != null) {
-                                val active = current(begin).isNotBlank() || current(end).isNotBlank()
+                                val beginVal = current(begin)
+                                val endVal = current(end)
+                                val active = beginVal.isNotBlank() || endVal.isNotBlank()
                                 BubbleCard {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -784,14 +815,14 @@ fun BoardSettingsScreen(
                                     ) {
                                         TimePickerField(
                                             label = "Start",
-                                            value = current(begin),
+                                            value = beginVal,
                                             onValueChange = { edit(begin, it) },
                                             enabled = !readOnly,
                                             modifier = Modifier.weight(1f),
                                         )
                                         TimePickerField(
                                             label = "End",
-                                            value = current(end),
+                                            value = endVal,
                                             onValueChange = { edit(end, it) },
                                             enabled = !readOnly,
                                             modifier = Modifier.weight(1f),
@@ -835,23 +866,8 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.Apb -> {
-                        val modeField = byKey["apbMode"]
-                        val apbOn = modeField != null && current(modeField) != "Off"
-                        val resyncAllField = byKey["apbResyncAll"]
-                        val resyncAllOn = resyncAllField != null && current(resyncAllField) == "Yes"
-                        val schedEnabledField = byKey["apbScheduleEnabled"]
                         val schedDaysField = byKey["apbScheduleDays"]
                         val schedTimeField = byKey["apbScheduleTime"]
-                        val schedOn = schedEnabledField != null && current(schedEnabledField) == "Yes"
-
-                        val visibleApbFields = sectionFields.filter { setting ->
-                            when (setting.key) {
-                                "apbMode" -> true
-                                "apbScheduleDays", "apbScheduleTime" -> false // rendered inside combined apbScheduleEnabled card
-                                "apbResyncList" -> apbOn && resyncAllOn
-                                else -> apbOn
-                            }
-                        }
 
                         items(
                             visibleApbFields,
@@ -865,8 +881,9 @@ fun BoardSettingsScreen(
                                 }
                             },
                         ) { setting ->
-                            val cur = current(setting)
-                            val dirty = setting.key in edits
+                            val edited = edits[setting.key]
+                            val dirty = edited != null
+                            val cur = edited ?: setting.value
                             val pending = setting.value != setting.gate
                             BubbleCard {
                                 Row(
@@ -900,7 +917,7 @@ fun BoardSettingsScreen(
                                 when (setting.key) {
                                     "apbMode" -> {
                                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            listOf("Off", "Passive", "Active", "Trap").forEach { mode ->
+                                            APB_MODE_OPTIONS.forEach { mode ->
                                                 FilterChip(
                                                     selected = cur == mode,
                                                     enabled = !readOnly,
@@ -931,7 +948,7 @@ fun BoardSettingsScreen(
                                     }
                                     "apbCounterEvery" -> {
                                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            listOf("Off", "15 Mins", "30 Mins", "Hour").forEach { opt ->
+                                            APB_COUNTER_OPTIONS.forEach { opt ->
                                                 FilterChip(
                                                     selected = cur == opt,
                                                     enabled = !readOnly,
@@ -954,7 +971,7 @@ fun BoardSettingsScreen(
                                     }
                                     "apbResyncAll" -> Unit
                                     "apbScheduleEnabled" -> {
-                                        if (schedOn) {
+                                        if (cur == "Yes") {
                                             if (schedTimeField != null) {
                                                 TimePickerField(
                                                     label = "Re-Sync time",
@@ -1004,7 +1021,6 @@ fun BoardSettingsScreen(
                             item(key = "display-mode", contentType = "display_mode") {
                                 BubbleCard {
                                     Text("LCD Message Layout", style = MaterialTheme.typography.titleSmall)
-                                    val noBorder = BorderStroke(0.dp, Color.Transparent)
                                     SingleChoiceSegmentedButtonRow(
                                         modifier = Modifier.fillMaxWidth(),
                                         space = 2.dp,
@@ -1017,7 +1033,7 @@ fun BoardSettingsScreen(
                                                     index = idx,
                                                     count = DisplayLayoutMode.entries.size,
                                                 ),
-                                                border = noBorder,
+                                                border = NO_BOARD_SEGMENT_BORDER,
                                                 colors = SegmentedButtonDefaults.colors(
                                                     inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                                                     activeBorderColor = Color.Transparent,
@@ -1040,8 +1056,9 @@ fun BoardSettingsScreen(
                             key = { it.key },
                             contentType = { if (it.editable) "setting_editable" else "setting_readonly" },
                         ) { setting ->
-                            val cur = current(setting)
-                            val dirty = setting.key in edits
+                            val edited = edits[setting.key]
+                            val dirty = edited != null
+                            val cur = edited ?: setting.value
                             val pending = setting.value != setting.gate
                             BubbleCard {
                                 Row(

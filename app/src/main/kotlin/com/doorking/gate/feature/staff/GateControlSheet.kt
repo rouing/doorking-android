@@ -397,8 +397,10 @@ fun JobProgressDialog(
     val progressInfo = remember(job.state, job.log, job.error) { parseJobProgress(job) }
     var showRawLog by remember { mutableStateOf(false) }
     val logScroll = rememberScrollState()
-    LaunchedEffect(job.log.size, showRawLog) {
-        if (showRawLog) logScroll.animateScrollTo(logScroll.maxValue)
+    if (showRawLog) {
+        LaunchedEffect(job.log.size) {
+            logScroll.animateScrollTo(logScroll.maxValue)
+        }
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -500,6 +502,16 @@ fun JobProgressDialog(
     )
 }
 
+private val HOLD_DURATION_OPTIONS = listOf(
+    15 to "Auto-release after 15 min",
+    30 to "Auto-release after 30 min",
+    60 to "Auto-release after 1 hour",
+    120 to "Auto-release after 2 hours",
+    240 to "Auto-release after 4 hours",
+    0 to "Hold until manually released",
+)
+private val SHOWN_RELAYS = listOf(0, 1, 2)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveRelaysSheetContent(
@@ -510,14 +522,6 @@ fun LiveRelaysSheetContent(
     onCancelTimer: (relay: Int) -> Unit,
     onClose: () -> Unit,
 ) {
-    val holdOptions = listOf(
-        15 to "Auto-release after 15 min",
-        30 to "Auto-release after 30 min",
-        60 to "Auto-release after 1 hour",
-        120 to "Auto-release after 2 hours",
-        240 to "Auto-release after 4 hours",
-        0 to "Hold until manually released",
-    )
     var holdMinutes by remember { mutableIntStateOf(30) }
     var holdMenuOpen by remember { mutableStateOf(false) }
     val semantic = LocalDoorkingColors.current
@@ -549,7 +553,7 @@ fun LiveRelaysSheetContent(
                 onExpandedChange = { holdMenuOpen = !holdMenuOpen },
             ) {
                 OutlinedTextField(
-                    value = holdOptions.firstOrNull { it.first == holdMinutes }?.second ?: "30 min",
+                    value = HOLD_DURATION_OPTIONS.firstOrNull { it.first == holdMinutes }?.second ?: "30 min",
                     onValueChange = {},
                     readOnly = true,
                     label = { Text("Hold duration") },
@@ -559,7 +563,7 @@ fun LiveRelaysSheetContent(
                         .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
                 )
                 ExposedDropdownMenu(expanded = holdMenuOpen, onDismissRequest = { holdMenuOpen = false }) {
-                    holdOptions.forEach { (mins, label) ->
+                    HOLD_DURATION_OPTIONS.forEach { (mins, label) ->
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = { holdMinutes = mins; holdMenuOpen = false },
@@ -569,8 +573,7 @@ fun LiveRelaysSheetContent(
             }
         }
 
-        val shownRelays = listOf(0, 1, 2)
-        shownRelays.forEach { relayNum ->
+        SHOWN_RELAYS.forEach { relayNum ->
             val relay = state.relays.firstOrNull { it.relay == relayNum }
             val isOpen = relay?.code == "1"
             val timer = state.relayTimers.firstOrNull { it.relay == relayNum }

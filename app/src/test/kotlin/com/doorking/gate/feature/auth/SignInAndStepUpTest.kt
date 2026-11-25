@@ -1,11 +1,14 @@
 package com.doorking.gate.feature.auth
 
+import android.content.ContextWrapper
 import com.doorking.gate.CrashStore
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.UiStepUpCoordinator
 import com.doorking.gate.core.auth.isGenuineUserCancellation
 import com.doorking.gate.core.network.ApiErrorResponse
+import com.doorking.gate.core.push.FirebaseHelper
+import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -30,7 +33,7 @@ class SignInAndStepUpTest {
         val deferred = async {
             coordinator.confirmStepUp(ApiErrorResponse(error = "Confirm with passkey", stepUp = true, hasPasskey = true))
         }
-        testScheduler.advanceUntilIdle()
+        testScheduler.runCurrent()
         assertNotNull(coordinator.pending.value)
         assertEquals("Confirm with passkey", coordinator.pending.value?.error?.error)
 
@@ -45,10 +48,41 @@ class SignInAndStepUpTest {
         val deferred = async {
             coordinator.confirmStepUp(ApiErrorResponse(error = "Confirm with passkey", stepUp = true, hasPasskey = true))
         }
-        testScheduler.advanceUntilIdle()
+        testScheduler.runCurrent()
         coordinator.resolve(false)
         assertFalse(deferred.await())
         assertNull(coordinator.pending.value)
+    }
+
+    @Test
+    fun stepUpCoordinatorTimesOutAndClearsPendingState() = runTest {
+        val coordinator = UiStepUpCoordinator()
+        val deferred = async {
+            coordinator.confirmStepUp(ApiErrorResponse(error = "Confirm with passkey", stepUp = true, hasPasskey = true))
+        }
+        testScheduler.runCurrent()
+        assertNotNull(coordinator.pending.value)
+
+        testScheduler.advanceTimeBy(UiStepUpCoordinator.STEP_UP_TIMEOUT_MS + 1L)
+        testScheduler.runCurrent()
+        assertFalse(deferred.await())
+        assertNull(coordinator.pending.value)
+    }
+
+    @Test
+    fun sessionStorageTracksAndResetsPushOptIn() = runTest {
+        val storage = FakeSessionStorage(initialToken = "dks_${"1".repeat(64)}")
+        assertFalse(storage.awaitLoaded().pushOptIn)
+
+        storage.setPushOptIn(true)
+        assertTrue(storage.awaitLoaded().pushOptIn)
+
+        FirebaseHelper.disablePushOptIn(ContextWrapper(null), storage)
+        assertFalse(storage.awaitLoaded().pushOptIn)
+
+        storage.setPushOptIn(true)
+        storage.clearSessionToken()
+        assertFalse(storage.awaitLoaded().pushOptIn)
     }
 
     @Test

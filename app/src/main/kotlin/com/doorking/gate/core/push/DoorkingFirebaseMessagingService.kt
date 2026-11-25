@@ -30,6 +30,7 @@ class DoorkingFirebaseMessagingService : FirebaseMessagingService() {
         if (app.startupCrash != null) return
         scope.launch {
             val stored = app.container.sessionStorage.awaitLoaded()
+            if (!stored.pushOptIn) return@launch
             if (stored.sessionToken.isNullOrBlank()) return@launch
             if (!FirebaseHelper.hasNotificationPermission(this@DoorkingFirebaseMessagingService)) return@launch
             runCatching {

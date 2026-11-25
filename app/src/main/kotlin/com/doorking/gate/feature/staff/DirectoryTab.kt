@@ -55,7 +55,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -346,7 +346,7 @@ fun DirectoryTab(
                 contentType = { "directory_row" },
             ) { row ->
                 val expanded by remember(row.directoryCode) {
-                    derivedStateOf { expandedCode == row.directoryCode }
+                    computedStateOf { expandedCode == row.directoryCode }
                 }
                 BubbleCard(
                     modifier = Modifier.semantics {

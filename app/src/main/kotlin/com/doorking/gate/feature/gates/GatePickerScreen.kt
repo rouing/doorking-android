@@ -1,6 +1,8 @@
 package com.doorking.gate.feature.gates
 
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -41,6 +43,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -52,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -60,6 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.doorking.gate.AppContainer
 import com.doorking.gate.core.auth.ThemeMode
+import com.doorking.gate.core.auth.normalizeServerUrl
 import com.doorking.gate.core.network.GateConfigDto
 import com.doorking.gate.core.network.GateInfoDto
 import com.doorking.gate.core.network.JobDto
@@ -72,6 +77,13 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.rememberExpandedModalSheetState
+import com.doorking.gate.feature.auth.isValidExternalBrowserUrl
+import com.doorking.gate.feature.auth.launchPinnedCustomTab
+
+private val MEMORY_SIZE_OPTIONS = listOf("1000", "2000", "3000")
+private val AREA_CODE_OPTIONS = listOf("10 Area Codes", "255 Area Codes")
+private val MODEL_NUMBER_OPTIONS = listOf("1833/1835/1837/1838", "1834")
+private val YES_NO_OPTIONS = listOf("N", "Y")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -87,6 +99,10 @@ fun GatePickerScreen(
     val vm: GatePickerViewModel = viewModel(factory = factory)
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showAddSheet by remember { mutableStateOf(false) }
+    var privacyError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    ReportDrawnWhen { !state.loading }
 
     LifecycleStartEffect(vm) {
         vm.setActive(true)
@@ -193,6 +209,9 @@ fun GatePickerScreen(
                 if (state.error != null) {
                     item(key = "error", contentType = "error") { ErrorBanner(state.error!!, onRetry = { vm.loadGates(initial = false) }) }
                 }
+                if (privacyError != null) {
+                    item(key = "privacyError", contentType = "error") { ErrorBanner(privacyError!!) }
+                }
                 if (state.addError != null) {
                     item(key = "addError", contentType = "error") { ErrorBanner(state.addError!!) }
                 }
@@ -227,6 +246,28 @@ fun GatePickerScreen(
                             enabled = state.openingPhone == null,
                             onClick = { vm.openGate(gate, onGateOpened) },
                         )
+                    }
+                }
+                item(key = "privacy_footer", contentType = "footer") {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        TextButton(
+                            onClick = {
+                                privacyError = null
+                                val serverUrl = normalizeServerUrl(container.sessionStorage.currentServerUrl())
+                                val privacyUrl = "${serverUrl.trimEnd('/')}/privacy"
+                                if (!isValidExternalBrowserUrl(privacyUrl)) {
+                                    privacyError = "Privacy Policy requires an HTTPS server URL."
+                                } else {
+                                    runCatching { launchPinnedCustomTab(context, privacyUrl) }
+                                        .onFailure { err -> privacyError = err.message ?: "Could not open Privacy Policy" }
+                                }
+                            },
+                        ) {
+                            Text("Privacy Policy")
+                        }
                     }
                 }
             }
@@ -411,14 +452,14 @@ private fun AddGateSheetContent(
             CompactDropdown(
                 label = "Memory",
                 value = memorySize,
-                options = listOf("1000", "2000", "3000"),
+                options = MEMORY_SIZE_OPTIONS,
                 onSelect = { memorySize = it },
                 modifier = Modifier.weight(1f),
             )
             CompactDropdown(
                 label = "Area codes",
                 value = areaCodes,
-                options = listOf("10 Area Codes", "255 Area Codes"),
+                options = AREA_CODE_OPTIONS,
                 onSelect = { areaCodes = it },
                 modifier = Modifier.weight(1.2f),
             )
@@ -427,7 +468,7 @@ private fun AddGateSheetContent(
         CompactDropdown(
             label = "Model",
             value = modelNumber,
-            options = listOf("1833/1835/1837/1838", "1834"),
+            options = MODEL_NUMBER_OPTIONS,
             onSelect = { modelNumber = it },
             modifier = Modifier.fillMaxWidth(),
         )
@@ -436,14 +477,14 @@ private fun AddGateSheetContent(
             CompactDropdown(
                 label = "Anti-passback",
                 value = antiPassBack,
-                options = listOf("N", "Y"),
+                options = YES_NO_OPTIONS,
                 onSelect = { antiPassBack = it },
                 modifier = Modifier.weight(1f),
             )
             CompactDropdown(
                 label = "Interface 1816/1820",
                 value = interface1816,
-                options = listOf("N", "Y"),
+                options = YES_NO_OPTIONS,
                 onSelect = { interface1816 = it },
                 modifier = Modifier.weight(1f),
             )

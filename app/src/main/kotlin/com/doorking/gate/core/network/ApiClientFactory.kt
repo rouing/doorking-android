@@ -3,6 +3,7 @@ package com.doorking.gate.core.network
 import com.doorking.gate.core.auth.DEFAULT_SERVER_URL
 import com.doorking.gate.core.auth.SessionStorage
 import kotlinx.serialization.json.Json
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -64,6 +65,40 @@ object ApiClientFactory {
             stepUpCoordinator = null,
         ),
     )
+
+    /**
+     * Dedicated OkHttpClient derived from [baseClient] with its own [Dispatcher] and no interactive
+     * step-up coordinator for Coil image loads and Media3 playback so media fetches share the
+     * connection pool without starving or deadlocking interactive API calls.
+     */
+    fun createMediaOkHttp(
+        baseClient: OkHttpClient,
+        sessionStorage: SessionStorage,
+        authEvents: AuthEventBus,
+    ): OkHttpClient {
+        val mediaInterceptor = DoorkingAuthInterceptor(
+            sessionStorage = sessionStorage,
+            authEvents = authEvents,
+            json = json,
+            stepUpCoordinator = null,
+        )
+        return baseClient.newBuilder()
+            .dispatcher(Dispatcher())
+            .apply {
+                interceptors().removeAll { it is DoorkingAuthInterceptor }
+                interceptors().add(0, mediaInterceptor)
+            }
+            .build()
+    }
+
+    /**
+     * Dedicated OkHttpClient derived from [baseClient] with a 90-second read timeout for
+     * long-running `testCameras` P2P diagnostics.
+     */
+    fun createCameraTestOkHttp(baseClient: OkHttpClient): OkHttpClient =
+        baseClient.newBuilder()
+            .readTimeout(90, TimeUnit.SECONDS)
+            .build()
 
     fun createApi(
         okHttpClient: OkHttpClient,

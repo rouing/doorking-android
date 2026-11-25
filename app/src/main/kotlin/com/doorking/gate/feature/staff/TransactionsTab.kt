@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.doorking.gate.core.media.MediaItemEntry
 import com.doorking.gate.core.media.MediaViewerDialog
+import com.doorking.gate.core.network.SnapshotMinuteDto
 import com.doorking.gate.core.network.TransactionRowDto
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
@@ -133,6 +134,16 @@ private fun keyTransactions(rows: List<TransactionRowDto>): List<KeyedTransactio
     }
 }
 
+private fun hasReadyMedia(snap: SnapshotMinuteDto?, isVideoMode: Boolean): Boolean {
+    val files = snap?.takeIf { it.status != "removed" }?.files ?: return false
+    if (files.isEmpty()) return false
+    return if (isVideoMode) {
+        files.any { it.endsWith(".mp4", ignoreCase = true) }
+    } else {
+        true
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TransactionsTab(
@@ -147,8 +158,13 @@ fun TransactionsTab(
     var query by remember { mutableStateOf("") }
     var viewing by remember { mutableStateOf<Pair<TransactionRowDto, List<MediaItemEntry>>?>(null) }
 
-    val visible = remember(state.transactions) {
-        keyTransactions(hidePortalHoldNoise(state.transactions))
+    val visible = remember(state.visibleTransactions, state.transactions) {
+        val rows = if (state.visibleTransactions.isNotEmpty() || state.transactions.isEmpty()) {
+            state.visibleTransactions
+        } else {
+            hidePortalHoldNoise(state.transactions)
+        }
+        keyTransactions(rows)
     }
     val filtered = remember(visible, query) {
         val q = query.trim().lowercase()
@@ -262,42 +278,34 @@ fun TransactionsTab(
             items(
                 items = filtered,
                 key = { it.key },
-                contentType = { "transaction" },
+                contentType = { (_, row) ->
+                    when {
+                        hasReadyMedia(state.snapshots[row.minute], isVideoMode) -> "tx_media"
+                        hasCamera && row.camera && row.minute.isNotBlank() -> "tx_action"
+                        else -> "tx_plain"
+                    }
+                },
             ) { (_, row) ->
                 val activeSnap = state.snapshots[row.minute]?.takeIf { it.status != "removed" }
                 val allFiles = activeSnap?.files.orEmpty()
                 val hasVideoFile = allFiles.any { it.endsWith(".mp4", ignoreCase = true) }
-                // In video mode, prefer saved .mp4 clips; poster JPEG is saved alongside as ch<N>.jpg (posterFile).
-                val displayFiles = remember(allFiles, isVideoMode, hasVideoFile) {
-                    if (isVideoMode && hasVideoFile) {
-                        allFiles.filter { it.endsWith(".mp4", ignoreCase = true) }
-                    } else {
-                        allFiles
-                    }
-                }
-                val hasReadyMedia = displayFiles.isNotEmpty() && (!isVideoMode || hasVideoFile)
-                val mediaEntries = remember(row.minute, displayFiles, base, gatePhone) {
-                    displayFiles.map { file ->
-                        MediaItemEntry(
-                            label = file.substringBefore('.').uppercase(),
-                            url = "$base/api/gates/$gatePhone/snapshots/${row.minute}/$file",
-                            isVideo = file.endsWith(".mp4", ignoreCase = true),
-                        )
-                    }
-                }
-                val thumbUrl = remember(row.minute, displayFiles, hasVideoFile, base, gatePhone) {
-                    when {
-                        hasVideoFile -> {
-                            val firstMp4 = displayFiles.firstOrNull { it.endsWith(".mp4", ignoreCase = true) }
+                val hasReadyMedia = allFiles.isNotEmpty() && (!isVideoMode || hasVideoFile)
+                val thumbUrl = if (hasReadyMedia) {
+                    remember(row.minute, allFiles, hasVideoFile, base, gatePhone) {
+                        if (hasVideoFile) {
+                            val firstMp4 = allFiles.firstOrNull { it.endsWith(".mp4", ignoreCase = true) }
                             firstMp4?.let { mp4 ->
                                 val poster = mp4.replace(MP4_EXT_REGEX, ".jpg")
                                 "$base/api/gates/$gatePhone/snapshots/${row.minute}/$poster"
                             }
-                        }
-                        else -> displayFiles.firstOrNull { it.endsWith(".jpg", ignoreCase = true) }?.let { jpg ->
-                            "$base/api/gates/$gatePhone/snapshots/${row.minute}/$jpg"
+                        } else {
+                            allFiles.firstOrNull { it.endsWith(".jpg", ignoreCase = true) }?.let { jpg ->
+                                "$base/api/gates/$gatePhone/snapshots/${row.minute}/$jpg"
+                            }
                         }
                     }
+                } else {
+                    null
                 }
 
                 val accessTone = when {
@@ -351,7 +359,21 @@ fun TransactionsTab(
                                     .clickable(
                                         role = Role.Button,
                                         onClickLabel = if (hasVideoFile) "Play gate video" else "View gate snapshot",
-                                    ) { viewing = row to mediaEntries },
+                                    ) {
+                                        val displayFiles = if (isVideoMode && hasVideoFile) {
+                                            allFiles.filter { it.endsWith(".mp4", ignoreCase = true) }
+                                        } else {
+                                            allFiles
+                                        }
+                                        val mediaEntries = displayFiles.map { file ->
+                                            MediaItemEntry(
+                                                label = file.substringBefore('.').uppercase(),
+                                                url = "$base/api/gates/$gatePhone/snapshots/${row.minute}/$file",
+                                                isVideo = file.endsWith(".mp4", ignoreCase = true),
+                                            )
+                                        }
+                                        viewing = row to mediaEntries
+                                    },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (thumbUrl != null) {

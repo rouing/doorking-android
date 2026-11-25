@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -93,6 +94,23 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
 private val NO_SEGMENT_BORDER = BorderStroke(0.dp, Color.Transparent)
+private val GATE_ROLE_OPTIONS = listOf("readonly", "editor", "admin")
+private val API_KEY_SCOPE_PRESETS = listOf(
+    "full" to "Full role",
+    "mcpRead" to "MCP Read-Only",
+    "mcpStaging" to "MCP Staging",
+)
+private val MCP_READ_SCOPES = listOf(
+    "gate:read", "directory:read", "transactions:read", "insights:read",
+    "history:read", "settings:read", "relays:read", "schedules:read", "cameras:read",
+)
+private val MCP_STAGING_SCOPES = listOf(
+    "gate:read", "directory:read", "directory:write", "transactions:read",
+    "insights:read", "history:read", "settings:read", "settings:write",
+    "relays:read", "schedules:read", "cameras:read", "gate:pull",
+)
+private val DEFAULT_WEBHOOK_EVENTS = listOf("send.completed", "relay.changed")
+private val DEFAULT_BUZZ_RELAYS = listOf(0)
 private val CAMERA_MODE_OPTIONS = listOf("snapshots" to "Snapshots", "video" to "Video")
 private val CAMERA_FRAME_OPTIONS = listOf(1, 2, 3, 4, 6)
 private val CAMERA_FRAMES_AFTER_OPTIONS = listOf(0, 1, 2, 3, 4, 6)
@@ -211,6 +229,14 @@ private suspend inline fun <T> safeSystemCall(block: () -> T): T? =
         null
     }
 
+private fun parseSystemApiError(raw: String?, code: Int, fallback: String): String {
+    if (!raw.isNullOrBlank()) {
+        val parsed = runCatching { ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw) }.getOrNull()
+        if (parsed != null && parsed.error.isNotBlank()) return parsed.error
+    }
+    return "$fallback (HTTP $code)"
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun SystemSettingsScreen(
@@ -218,6 +244,7 @@ fun SystemSettingsScreen(
     api: DoorkingApi,
     isAdmin: Boolean,
     meUsername: String,
+    cameraTestApi: DoorkingApi = api,
     onMessage: (String) -> Unit = {},
     onDeletedGate: () -> Unit,
     onReloadGate: () -> Unit,
@@ -225,6 +252,7 @@ fun SystemSettingsScreen(
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var login by remember { mutableStateOf<GateLoginDto?>(null) }
+    var loginSyncVersion by remember { mutableIntStateOf(0) }
     var users by remember { mutableStateOf<List<GateUserDto>>(emptyList()) }
     var apiKeys by remember { mutableStateOf<List<ApiKeyInfoDto>>(emptyList()) }
     var webhooks by remember { mutableStateOf<List<WebhookInfoDto>>(emptyList()) }
@@ -233,17 +261,8 @@ fun SystemSettingsScreen(
     var requests by remember { mutableStateOf<List<ResidentRequestDto>>(emptyList()) }
     var prefs by remember { mutableStateOf(GatePrefsDto()) }
     var cameras by remember { mutableStateOf<CameraSettingsDto?>(null) }
-    var cameraForm by remember { mutableStateOf(CameraFormState()) }
-    var cameraSaving by remember { mutableStateOf(false) }
-    var cameraTesting by remember { mutableStateOf(false) }
-    var cameraDeleting by remember { mutableStateOf(false) }
-    var cameraStatusMessage by remember { mutableStateOf<String?>(null) }
-    var cameraError by remember { mutableStateOf<String?>(null) }
-    var cameraTestResults by remember { mutableStateOf<List<CameraTestChannelDto>?>(null) }
-    var confirmCameraRetention by remember { mutableStateOf(false) }
-    var confirmRemoveCameras by remember { mutableStateOf(false) }
-    var confirmDeleteSnapshots by remember { mutableStateOf(false) }
-    var createdKey by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var camerasSyncVersion by remember { mutableIntStateOf(0) }
+    var createdKey by remember(gatePhone) { mutableStateOf<Pair<String, String>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     // Destructive confirmation dialog targets (P0 safety)
@@ -263,17 +282,6 @@ fun SystemSettingsScreen(
     var openDanger by remember { mutableStateOf(false) }
     var confirmDeleteGate by remember { mutableStateOf(false) }
 
-    // Form fields
-    var dksUser by remember { mutableStateOf("") }
-    var dksPassword by remember { mutableStateOf("") }
-    var masterCode by remember { mutableStateOf("") }
-    var shareUser by remember { mutableStateOf("") }
-    var shareRole by remember { mutableStateOf("readonly") }
-    var keyName by remember { mutableStateOf("") }
-    var keyRole by remember { mutableStateOf("readonly") }
-    var keyScopePreset by remember { mutableStateOf("full") }
-    var whName by remember { mutableStateOf("") }
-    var whUrl by remember { mutableStateOf("") }
     val deviceStates = remember { List(10) { mutableStateOf(DeviceRangeDto()) } }
     var hasLoadedOnce by remember(gatePhone) { mutableStateOf(false) }
 
@@ -282,14 +290,47 @@ fun SystemSettingsScreen(
     val gateRelays = remember(prefs.tracker) { openableRelayIndices(prefs.tracker) }
 
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
-    fun parseErr(raw: String?, code: Int, fallback: String): String {
-        if (!raw.isNullOrBlank()) {
-            val parsed = runCatching { ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw) }.getOrNull()
-            if (parsed != null && parsed.error.isNotBlank()) return parsed.error
+    suspend fun refreshPrefs() {
+        safeSystemCall { api.getPrefs(gatePhone) }?.let { loaded ->
+            prefs = loaded
+            repeat(10) { i -> deviceStates[i].value = loaded.deviceAssociation.getOrElse(i) { DeviceRangeDto() } }
         }
-        return "$fallback (HTTP $code)"
+    }
+
+    suspend fun refreshLogin() {
+        safeSystemCall { api.getGateLogin(gatePhone) }?.let { loaded ->
+            login = loaded
+            loginSyncVersion++
+        }
+    }
+
+    suspend fun refreshUsers() {
+        safeSystemCall { api.getGateUsers(gatePhone).users }?.let { users = it }
+    }
+
+    suspend fun refreshApiKeys() {
+        safeSystemCall { api.getApiKeys(gatePhone).apiKeys }?.let { apiKeys = it }
+    }
+
+    suspend fun refreshWebhooks() {
+        safeSystemCall { api.getWebhooks(gatePhone).webhooks }?.let { webhooks = it }
+    }
+
+    suspend fun refreshRequests() {
+        safeSystemCall { api.getAdminResidentRequests(gatePhone).requests }?.let { requests = it }
+    }
+
+    suspend fun refreshReports() {
+        safeSystemCall { api.getSuspiciousReports(gatePhone).reports }?.let { reports = it }
+    }
+
+    suspend fun refreshCameras() {
+        val loaded = safeSystemCall { api.getCameras(gatePhone) }
+        if (loaded != null) {
+            cameras = loaded.settings
+            camerasSyncVersion++
+        }
     }
 
     suspend fun load(initial: Boolean = false) {
@@ -310,18 +351,16 @@ fun SystemSettingsScreen(
                     val requestsDef = async { safeSystemCall { api.getAdminResidentRequests(gatePhone).requests } ?: emptyList() }
                     val camsDef = async { safeSystemCall { api.getCameras(gatePhone).settings } }
 
-                    val loadedLogin = loginDef.await()
-                    login = loadedLogin
-                    dksUser = loadedLogin?.dksUser.orEmpty()
+                    login = loginDef.await()
+                    loginSyncVersion++
                     users = usersDef.await()
                     apiKeys = keysDef.await()
                     webhooks = webhooksDef.await()
                     audit = auditDef.await()
                     reports = reportsDef.await()
                     requests = requestsDef.await()
-                    val cams = camsDef.await()
-                    cameras = cams
-                    cameraForm = cameraFormStateFrom(cams)
+                    cameras = camsDef.await()
+                    camerasSyncVersion++
                 }
             }
         }
@@ -350,9 +389,9 @@ fun SystemSettingsScreen(
                         scope.launch {
                             runCatching {
                                 val res = api.removeGateUser(gatePhone, target.username)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Remove failed"))
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Remove failed"))
                             }
-                                .onSuccess { onMessage("Removed ${target.username}."); load() }
+                                .onSuccess { onMessage("Removed ${target.username}."); refreshUsers() }
                                 .onFailure { error = it.message ?: "Remove failed" }
                         }
                     },
@@ -376,9 +415,9 @@ fun SystemSettingsScreen(
                         scope.launch {
                             runCatching {
                                 val res = api.revokeApiKey(gatePhone, target.id)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Revoke failed"))
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Revoke failed"))
                             }
-                                .onSuccess { onMessage("Revoked \"${target.name}\"."); load() }
+                                .onSuccess { onMessage("Revoked \"${target.name}\"."); refreshApiKeys() }
                                 .onFailure { error = it.message ?: "Revoke failed" }
                         }
                     },
@@ -402,139 +441,15 @@ fun SystemSettingsScreen(
                         scope.launch {
                             runCatching {
                                 val res = api.deleteWebhook(gatePhone, target.id)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Delete failed"))
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Delete failed"))
                             }
-                                .onSuccess { onMessage("Deleted webhook \"${target.name}\"."); load() }
+                                .onSuccess { onMessage("Deleted webhook \"${target.name}\"."); refreshWebhooks() }
                                 .onFailure { error = it.message ?: "Delete failed" }
                         }
                     },
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { deleteWebhookTarget = null }) { Text("Cancel") } },
-        )
-    }
-
-    fun performCameraSave() {
-        cameraError = null
-        cameraStatusMessage = null
-        cameraSaving = true
-        scope.launch {
-            val payload = buildCameraSettingsPayload(cameraForm)
-            runCatching {
-                val res = api.saveCameras(gatePhone, payload)
-                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
-            }
-                .onSuccess {
-                    cameraSaving = false
-                    cameraForm = cameraForm.copy(password = "")
-                    cameraStatusMessage = "Saved. Use Test cameras to verify the login and channels."
-                    onMessage("Camera settings saved.")
-                    load()
-                    onReloadGate()
-                }
-                .onFailure {
-                    cameraSaving = false
-                    cameraError = it.message ?: "Save failed"
-                }
-        }
-    }
-
-    if (confirmCameraRetention) {
-        val keep = cameraForm.keepDays
-        AlertDialog(
-            onDismissRequest = { confirmCameraRetention = false },
-            title = { Text("Keep pictures for $keep days?") },
-            text = { Text("Pictures and videos older than $keep days are deleted now, and each day from then on. This cannot be undone.") },
-            confirmButton = {
-                Button(
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
-                    onClick = {
-                        confirmCameraRetention = false
-                        performCameraSave()
-                    },
-                ) { Text("Save") }
-            },
-            dismissButton = { TextButton(onClick = { confirmCameraRetention = false }) { Text("Cancel") } },
-        )
-    }
-
-    if (confirmRemoveCameras) {
-        AlertDialog(
-            onDismissRequest = { confirmRemoveCameras = false },
-            title = { Text("Remove camera settings?") },
-            text = { Text("Removes the recorder credentials and channel settings for this gate. Saved snapshots are kept.") },
-            confirmButton = {
-                Button(
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
-                    onClick = {
-                        confirmRemoveCameras = false
-                        cameraError = null
-                        cameraStatusMessage = null
-                        cameraDeleting = true
-                        scope.launch {
-                            runCatching {
-                                val res = api.deleteCameras(gatePhone)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Remove failed"))
-                            }
-                                .onSuccess {
-                                    cameraDeleting = false
-                                    cameraTestResults = null
-                                    cameraStatusMessage = "Camera settings removed."
-                                    onMessage("Camera settings removed.")
-                                    load()
-                                    onReloadGate()
-                                }
-                                .onFailure {
-                                    cameraDeleting = false
-                                    cameraError = it.message ?: "Remove failed"
-                                }
-                        }
-                    },
-                ) { Text("Remove") }
-            },
-            dismissButton = { TextButton(onClick = { confirmRemoveCameras = false }) { Text("Cancel") } },
-        )
-    }
-
-    if (confirmDeleteSnapshots) {
-        AlertDialog(
-            onDismissRequest = { confirmDeleteSnapshots = false },
-            title = { Text("Delete all saved snapshots?") },
-            text = { Text("Permanently deletes every saved picture and video for this gate. This cannot be undone. Transactions still in the backfill window get new pictures on the next snapshot run.") },
-            confirmButton = {
-                Button(
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
-                    onClick = {
-                        confirmDeleteSnapshots = false
-                        cameraError = null
-                        cameraStatusMessage = null
-                        cameraDeleting = true
-                        scope.launch {
-                            runCatching {
-                                val res = api.deleteAllSnapshots(gatePhone)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Delete failed"))
-                                res.body()
-                            }
-                                .onSuccess { reply ->
-                                    cameraDeleting = false
-                                    cameraTestResults = null
-                                    val files = reply?.files ?: 0
-                                    val minutes = reply?.minutes ?: 0
-                                    val summary = "Deleted $files file(s) across $minutes minute(s)."
-                                    cameraStatusMessage = summary
-                                    onMessage(summary)
-                                    load()
-                                    onReloadGate()
-                                }
-                                .onFailure {
-                                    cameraDeleting = false
-                                    cameraError = it.message ?: "Delete failed"
-                                }
-                        }
-                    },
-                ) { Text("Delete all") }
-            },
-            dismissButton = { TextButton(onClick = { confirmDeleteSnapshots = false }) { Text("Cancel") } },
         )
     }
 
@@ -554,7 +469,7 @@ fun SystemSettingsScreen(
                         scope.launch {
                             runCatching {
                                 val res = api.deleteGateData(gatePhone)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Delete failed"))
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Delete failed"))
                             }
                                 .onSuccess { onDeletedGate() }
                                 .onFailure { error = it.message ?: "Delete failed" }
@@ -587,615 +502,838 @@ fun SystemSettingsScreen(
                 }
             }
 
-        if (isAdmin) {
-            // 1. Gate Login
-            item(key = "login", contentType = "section_login") {
-                CollapsibleSection(
-                    title = "Gate Login (DKS Cloud)",
-                    expanded = openLogin,
-                    onToggle = { openLogin = !openLogin },
-                    helpText = "The DKS Cloud username, password, and 4-digit gate master code used for every pull, send, live relay action, and scheduled transfer. Stored encrypted on your server.",
-                ) {
-                    OutlinedTextField(
-                        value = dksUser,
-                        onValueChange = { dksUser = it },
-                        label = { Text("DKS user") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    PasswordOutlinedField(
-                        value = dksPassword,
-                        onValueChange = { dksPassword = it },
-                        label = if (login?.dksPasswordSet == true) "DKS password (blank keeps saved)" else "DKS password",
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    PasswordOutlinedField(
-                        value = masterCode,
-                        onValueChange = { masterCode = it },
-                        label = "Master code (4 digits, blank keeps saved)",
-                        digitsOnly = true,
-                        maxLength = 4,
-                        showVisibilityToggle = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Button(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            error = null
-                            scope.launch {
-                                runCatching {
-                                    val res = api.updateGateLogin(gatePhone, GateLoginUpdateRequest(dksUser.trim(), dksPassword, masterCode))
-                                    if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
-                                }
-                                    .onSuccess { dksPassword = ""; masterCode = ""; onMessage("Gate login updated."); load() }
-                                    .onFailure { error = it.message ?: "Save failed" }
-                            }
-                        },
-                    ) { Text("Save gate login") }
-                }
-            }
-
-            // 2. Gate Users & Share
-            item(key = "users", contentType = "section_users") {
-                CollapsibleSection("Gate Users (${users.size})", openUsers, { openUsers = !openUsers }) {
-                    users.forEach { u ->
-                        val roleTone = when (u.role) {
-                            "admin" -> PillTone.Primary
-                            "editor" -> PillTone.Warning
-                            "resident" -> PillTone.Success
-                            else -> PillTone.Neutral
-                        }
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(u.username, style = MaterialTheme.typography.titleSmall)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        StatusPill(u.role.replaceFirstChar(Char::uppercase), tone = roleTone)
-                                        if (u.invited) StatusPill("Invited", tone = PillTone.Warning)
-                                        if (u.email.isNotBlank()) StatusPill(u.email, tone = PillTone.Neutral)
-                                    }
-                                }
-                                if (u.username != meUsername) {
-                                    IconButton(onClick = { removeUserTarget = u }) {
-                                        Icon(Icons.Rounded.Delete, contentDescription = "Remove ${u.username}", tint = MaterialTheme.colorScheme.error)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = shareUser,
-                            onValueChange = { shareUser = it },
-                            label = { Text("Share with username") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Button(
-                            enabled = shareUser.isNotBlank(),
-                            onClick = {
-                                scope.launch {
-                                    runCatching {
-                                        val res = api.shareGate(gatePhone, ShareGateRequest(shareUser.trim(), shareRole))
-                                        if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Share failed"))
-                                    }
-                                        .onSuccess { shareUser = ""; onMessage("Gate shared."); load() }
-                                        .onFailure { error = it.message ?: "Share failed" }
-                                }
-                            },
-                        ) { Text("Share") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("readonly", "editor", "admin").forEach { r ->
-                            FilterChip(selected = shareRole == r, onClick = { shareRole = r }, label = { Text(r.replaceFirstChar(Char::uppercase)) })
-                        }
-                    }
-                }
-            }
-
-            // 3. Security, Portal & Review Queues
-            item(key = "portal", contentType = "section_portal") {
-                val pendingCount = pendingRequests.size + openReports.size
-                CollapsibleSection(
-                    title = "Security & Resident Portal" + if (pendingCount > 0) " ($pendingCount)" else "",
-                    expanded = openPortal,
-                    onToggle = { openPortal = !openPortal },
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
+            if (isAdmin) {
+                // 1. Gate Login
+                item(key = "login", contentType = "section_login") {
+                    CollapsibleSection(
+                        title = "Gate Login (DKS Cloud)",
+                        expanded = openLogin,
+                        onToggle = { openLogin = !openLogin },
+                        helpText = "The DKS Cloud username, password, and 4-digit gate master code used for every pull, send, live relay action, and scheduled transfer. Stored encrypted on your server.",
                     ) {
-                        Text("Require strong sign-in for admin actions", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = prefs.requireStrongAdmin,
-                            onCheckedChange = { next ->
-                                scope.launch {
-                                    val body = buildJsonObject { put("requireStrongAdmin", JsonPrimitive(next)) }
-                                    runCatching { api.updatePrefs(gatePhone, body) }
-                                        .onSuccess { load(); onReloadGate() }
-                                        .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
-                                }
-                            },
+                        GateLoginSectionContent(
+                            gatePhone = gatePhone,
+                            api = api,
+                            login = login,
+                            syncVersion = loginSyncVersion,
+                            onError = { error = it },
+                            onMessage = onMessage,
+                            onSaved = { refreshLogin() },
                         )
                     }
+                }
 
-                    val portalCfg = prefs.residentPortal
-                    val portalEnabled = portalCfg?.enabled == true
-                    val buzzEnabled = portalCfg?.buzzEnabled == true
-                    val activeBuzzRelays = (portalCfg?.buzzRelays ?: listOf(0)).ifEmpty { listOf(0) }
-
-                    fun savePortalPatch(
-                        nextEnabled: Boolean = portalEnabled,
-                        nextBuzzEnabled: Boolean = buzzEnabled,
-                        nextBuzzRelays: List<Int> = activeBuzzRelays,
-                    ) {
-                        scope.launch {
-                            val body = buildJsonObject {
-                                put(
-                                    "residentPortal",
-                                    buildJsonObject {
-                                        put("enabled", JsonPrimitive(nextEnabled))
-                                        put("buzzEnabled", JsonPrimitive(nextBuzzEnabled))
-                                        put(
-                                            "buzzRelays",
-                                            kotlinx.serialization.json.JsonArray(nextBuzzRelays.distinct().sorted().map { JsonPrimitive(it) }),
-                                        )
-                                        put("pulseSeconds", JsonPrimitive(portalCfg?.pulseSeconds ?: 4))
-                                        put("maxRerollsPerDay", JsonPrimitive(portalCfg?.maxRerollsPerDay ?: 2))
-                                        put("autoSendReroll", JsonPrimitive(portalCfg?.autoSendReroll == true))
-                                        put("showSnapshots", JsonPrimitive(portalCfg?.showSnapshots == true))
-                                        put("allowRequests", JsonPrimitive(portalCfg?.allowRequests != false))
-                                        put("requirePasskeyForBuzz", JsonPrimitive(portalCfg?.requirePasskeyForBuzz == true))
-                                    },
-                                )
-                            }
-                            runCatching { api.updatePrefs(gatePhone, body) }
-                                .onSuccess { load(); onReloadGate() }
-                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
-                        }
+                // 2. Gate Users & Share
+                item(key = "users", contentType = "section_users") {
+                    CollapsibleSection("Gate Users (${users.size})", openUsers, { openUsers = !openUsers }) {
+                        GateUsersSectionContent(
+                            gatePhone = gatePhone,
+                            api = api,
+                            users = users,
+                            meUsername = meUsername,
+                            onRequestRemoveUser = { removeUserTarget = it },
+                            onError = { error = it },
+                            onMessage = onMessage,
+                            onShared = { refreshUsers() },
+                        )
                     }
+                }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
+                // 3. Security, Portal & Review Queues
+                item(key = "portal", contentType = "section_portal") {
+                    val pendingCount = pendingRequests.size + openReports.size
+                    CollapsibleSection(
+                        title = "Security & Resident Portal" + if (pendingCount > 0) " ($pendingCount)" else "",
+                        expanded = openPortal,
+                        onToggle = { openPortal = !openPortal },
                     ) {
-                        Text("Enable Resident Portal", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                        Switch(checked = portalEnabled, onCheckedChange = { savePortalPatch(nextEnabled = it) })
-                    }
-                    if (portalEnabled) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("Allow residents to Buzz Me In", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                            Switch(checked = buzzEnabled, onCheckedChange = { savePortalPatch(nextBuzzEnabled = it) })
-                        }
-                        if (buzzEnabled) {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    text = "Relays residents can open (admins always see all relays)",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    gateRelays.forEach { relay ->
-                                        val selected = relay in activeBuzzRelays
-                                        val label = relayDisplayName(prefs.relayLabels, relay)
-                                        FilterChip(
-                                            selected = selected,
-                                            onClick = {
-                                                val next = if (selected) activeBuzzRelays.filterNot { it == relay } else activeBuzzRelays + relay
-                                                savePortalPatch(nextBuzzRelays = next.ifEmpty { listOf(gateRelays.first()) })
-                                            },
-                                            label = { Text(label) },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    pendingRequests.forEach { req ->
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                            Text("Unit ${req.directoryCode} · ${req.kind}", style = MaterialTheme.typography.titleSmall)
-                            if (req.note.isNotBlank()) Text(req.note, style = MaterialTheme.typography.bodySmall)
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    modifier = Modifier.weight(1f),
-                                    onClick = {
-                                        scope.launch {
-                                            runCatching { api.reviewResidentRequest(gatePhone, req.id, ReviewResidentRequestBody("rejected")) }
-                                                .onSuccess { onMessage("Request rejected."); load() }
-                                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
-                                        }
-                                    },
-                                ) { Text("Reject") }
-                                Button(
-                                    modifier = Modifier.weight(1f),
-                                    onClick = {
-                                        scope.launch {
-                                            runCatching { api.reviewResidentRequest(gatePhone, req.id, ReviewResidentRequestBody("approved", apply = true)) }
-                                                .onSuccess { onMessage("Request approved."); load(); onReloadGate() }
-                                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
-                                        }
-                                    },
-                                ) { Text("Approve") }
-                            }
-                        }
-                    }
-                    openReports.forEach { rep ->
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                            Text("Suspicious · Unit ${rep.directoryCode}", style = MaterialTheme.typography.titleSmall)
-                            Text(rep.txSummary, style = MaterialTheme.typography.bodySmall)
-                            if (rep.note.isNotBlank()) Text(rep.note, style = MaterialTheme.typography.bodySmall)
-                            OutlinedButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = {
+                            Text("Require strong sign-in for admin actions", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Switch(
+                                checked = prefs.requireStrongAdmin,
+                                onCheckedChange = { next ->
                                     scope.launch {
-                                        runCatching { api.resolveSuspiciousReport(gatePhone, rep.id, ResolveReportRequest("Reviewed in app")) }
-                                            .onSuccess { onMessage("Report resolved."); load() }
-                                            .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                        val body = buildJsonObject { put("requireStrongAdmin", JsonPrimitive(next)) }
+                                        runCatching {
+                                            val res = api.updatePrefs(gatePhone, body)
+                                            if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Save failed"))
+                                        }
+                                            .onSuccess { refreshPrefs(); onReloadGate() }
+                                            .onFailure { error = it.message ?: ApiClientFactory.parseErrorMessage(it) }
                                     }
                                 },
-                            ) { Text("Mark resolved") }
-                        }
-                    }
-                }
-            }
-
-            // 4. Login Audit Log
-            item(key = "audit", contentType = "section_audit") {
-                CollapsibleSection("Login Audit Log (${audit.size})", openAudit, { openAudit = !openAudit }) {
-                    audit.take(25).forEach { e ->
-                        val tone = when (e.outcome) {
-                            "success" -> PillTone.Success
-                            "failed", "rate_limited" -> PillTone.Error
-                            else -> PillTone.Neutral
-                        }
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(e.username ?: e.identifier, style = MaterialTheme.typography.titleSmall)
-                                StatusPill(e.outcome, tone = tone)
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                StatusPill(e.method, tone = PillTone.Primary)
-                                if (e.ip.isNotBlank()) StatusPill(e.ip, tone = PillTone.Neutral)
-                                StatusPill(e.createdAt.take(16).replace('T', ' '), tone = PillTone.Neutral)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 5. API Keys (compact bubble cards + full-width Name input row)
-            item(key = "keys", contentType = "section_keys") {
-                CollapsibleSection(
-                    title = "API Keys (${apiKeys.size})",
-                    expanded = openKeys,
-                    onToggle = { openKeys = !openKeys },
-                    helpText = "Scoped tokens for scripts, home automation, or MCP clients to access this gate without signing in. Each key is restricted to this gate and its assigned role/scopes.",
-                ) {
-                    if (createdKey != null) {
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.primaryContainer) {
-                            Text("Key \"${createdKey!!.first}\" created — copy now:", style = MaterialTheme.typography.titleSmall)
-                            Text(createdKey!!.second, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = {
-                                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clip.setPrimaryClip(ClipData.newPlainText("DoorKing API Key", createdKey!!.second))
-                                    onMessage("API key copied.")
-                                }) {
-                                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
-                                    Text("Copy", modifier = Modifier.padding(start = 4.dp))
-                                }
-                                TextButton(onClick = { createdKey = null }) { Text("Done") }
-                            }
-                        }
-                    }
-                    apiKeys.forEach { k ->
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(k.name, style = MaterialTheme.typography.titleSmall)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        StatusPill(k.role.replaceFirstChar(Char::uppercase), tone = if (k.role == "admin") PillTone.Primary else PillTone.Neutral)
-                                        if (!k.scopes.isNullOrEmpty()) {
-                                            StatusPill("Scoped (${k.scopes.size})", tone = PillTone.Primary)
-                                        }
-                                        StatusPill(k.lastUsedAt?.take(10)?.let { "Used $it" } ?: "Unused", tone = PillTone.Neutral)
-                                    }
-                                }
-                                OutlinedButton(
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                                    onClick = { revokeKeyTarget = k },
-                                ) { Text("Revoke") }
-                            }
-                        }
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = keyName,
-                            onValueChange = { keyName = it.take(40) },
-                            label = { Text("New key name") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Button(
-                            enabled = keyName.isNotBlank(),
-                            onClick = {
-                                scope.launch {
-                                    runCatching {
-                                        val selectedScopes = when (keyScopePreset) {
-                                            "mcpRead" -> listOf(
-                                                "gate:read", "directory:read", "transactions:read", "insights:read",
-                                                "history:read", "settings:read", "relays:read", "schedules:read", "cameras:read",
-                                            )
-                                            "mcpStaging" -> listOf(
-                                                "gate:read", "directory:read", "directory:write", "transactions:read",
-                                                "insights:read", "history:read", "settings:read", "settings:write",
-                                                "relays:read", "schedules:read", "cameras:read", "gate:pull",
-                                            )
-                                            else -> null
-                                        }
-                                        val res = api.createApiKey(gatePhone, CreateApiKeyRequest(keyName.trim(), keyRole, 0, selectedScopes))
-                                        if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Create failed"))
-                                        res.body()!!
-                                    }
-                                        .onSuccess { created ->
-                                            createdKey = created.apiKey.name to created.key
-                                            keyName = ""
-                                            keyScopePreset = "full"
-                                            load()
-                                        }
-                                        .onFailure { error = it.message ?: "Create failed" }
-                                }
-                            },
-                        ) { Text("Create") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("readonly", "editor", "admin").forEach { r ->
-                            FilterChip(selected = keyRole == r, onClick = { keyRole = r }, label = { Text(r.replaceFirstChar(Char::uppercase)) })
-                        }
-                    }
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(
-                            "full" to "Full role",
-                            "mcpRead" to "MCP Read-Only",
-                            "mcpStaging" to "MCP Staging",
-                        ).forEach { (presetKey, label) ->
-                            FilterChip(
-                                selected = keyScopePreset == presetKey,
-                                onClick = {
-                                    keyScopePreset = presetKey
-                                    if (presetKey == "mcpStaging" && keyRole == "readonly") keyRole = "editor"
-                                },
-                                label = { Text(label) },
                             )
                         }
-                    }
-                }
-            }
 
-            // 6. Webhooks
-            item(key = "webhooks", contentType = "section_webhooks") {
-                CollapsibleSection("Webhooks (${webhooks.size})", openWebhooks, { openWebhooks = !openWebhooks }) {
-                    webhooks.forEach { w ->
-                        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                        val portalCfg = prefs.residentPortal
+                        val portalEnabled = portalCfg?.enabled == true
+                        val buzzEnabled = portalCfg?.buzzEnabled == true
+                        val activeBuzzRelays = (portalCfg?.buzzRelays ?: DEFAULT_BUZZ_RELAYS).ifEmpty { DEFAULT_BUZZ_RELAYS }
+
+                        fun savePortalPatch(
+                            nextEnabled: Boolean = portalEnabled,
+                            nextBuzzEnabled: Boolean = buzzEnabled,
+                            nextBuzzRelays: List<Int> = activeBuzzRelays,
+                        ) {
+                            scope.launch {
+                                val body = buildJsonObject {
+                                    put(
+                                        "residentPortal",
+                                        buildJsonObject {
+                                            put("enabled", JsonPrimitive(nextEnabled))
+                                            put("buzzEnabled", JsonPrimitive(nextBuzzEnabled))
+                                            put(
+                                                "buzzRelays",
+                                                JsonArray(nextBuzzRelays.distinct().sorted().map { JsonPrimitive(it) }),
+                                            )
+                                            put("pulseSeconds", JsonPrimitive(portalCfg?.pulseSeconds ?: 4))
+                                            put("maxRerollsPerDay", JsonPrimitive(portalCfg?.maxRerollsPerDay ?: 2))
+                                            put("autoSendReroll", JsonPrimitive(portalCfg?.autoSendReroll == true))
+                                            put("showSnapshots", JsonPrimitive(portalCfg?.showSnapshots == true))
+                                            put("allowRequests", JsonPrimitive(portalCfg?.allowRequests != false))
+                                            put("requirePasskeyForBuzz", JsonPrimitive(portalCfg?.requirePasskeyForBuzz == true))
+                                        },
+                                    )
+                                }
+                                runCatching {
+                                    val res = api.updatePrefs(gatePhone, body)
+                                    if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Save failed"))
+                                }
+                                    .onSuccess { refreshPrefs(); onReloadGate() }
+                                    .onFailure { error = it.message ?: ApiClientFactory.parseErrorMessage(it) }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Enable Resident Portal", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Switch(checked = portalEnabled, onCheckedChange = { savePortalPatch(nextEnabled = it) })
+                        }
+                        if (portalEnabled) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(w.name, style = MaterialTheme.typography.titleSmall)
-                                    Text(w.url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    TextButton(onClick = {
-                                        scope.launch {
-                                            runCatching { api.testWebhook(gatePhone, w.id) }
-                                                .onSuccess { onMessage("Test webhook sent.") }
-                                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                Text("Allow residents to Buzz Me In", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                                Switch(checked = buzzEnabled, onCheckedChange = { savePortalPatch(nextBuzzEnabled = it) })
+                            }
+                            if (buzzEnabled) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "Relays residents can open (admins always see all relays)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        gateRelays.forEach { relay ->
+                                            val selected = relay in activeBuzzRelays
+                                            val label = relayDisplayName(prefs.relayLabels, relay)
+                                            FilterChip(
+                                                selected = selected,
+                                                onClick = {
+                                                    val next = if (selected) activeBuzzRelays.filterNot { it == relay } else activeBuzzRelays + relay
+                                                    savePortalPatch(nextBuzzRelays = next.ifEmpty { listOf(gateRelays.first()) })
+                                                },
+                                                label = { Text(label) },
+                                            )
                                         }
-                                    }) { Text("Test") }
-                                    IconButton(onClick = { deleteWebhookTarget = w }) {
-                                        Icon(Icons.Rounded.Delete, contentDescription = "Delete webhook ${w.name}", tint = MaterialTheme.colorScheme.error)
                                     }
                                 }
                             }
                         }
+                        pendingRequests.forEach { req ->
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                Text("Unit ${req.directoryCode} · ${req.kind}", style = MaterialTheme.typography.titleSmall)
+                                if (req.note.isNotBlank()) Text(req.note, style = MaterialTheme.typography.bodySmall)
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(
+                                        modifier = Modifier.weight(1f),
+                                        onClick = {
+                                            scope.launch {
+                                                runCatching { api.reviewResidentRequest(gatePhone, req.id, ReviewResidentRequestBody("rejected")) }
+                                                    .onSuccess { onMessage("Request rejected."); refreshRequests() }
+                                                    .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                            }
+                                        },
+                                    ) { Text("Reject") }
+                                    Button(
+                                        modifier = Modifier.weight(1f),
+                                        onClick = {
+                                            scope.launch {
+                                                runCatching { api.reviewResidentRequest(gatePhone, req.id, ReviewResidentRequestBody("approved", apply = true)) }
+                                                    .onSuccess { onMessage("Request approved."); refreshRequests(); onReloadGate() }
+                                                    .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                            }
+                                        },
+                                    ) { Text("Approve") }
+                                }
+                            }
+                        }
+                        openReports.forEach { rep ->
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                Text("Suspicious · Unit ${rep.directoryCode}", style = MaterialTheme.typography.titleSmall)
+                                Text(rep.txSummary, style = MaterialTheme.typography.bodySmall)
+                                if (rep.note.isNotBlank()) Text(rep.note, style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = {
+                                        scope.launch {
+                                            runCatching { api.resolveSuspiciousReport(gatePhone, rep.id, ResolveReportRequest("Reviewed in app")) }
+                                                .onSuccess { onMessage("Report resolved."); refreshReports() }
+                                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                        }
+                                    },
+                                ) { Text("Mark resolved") }
+                            }
+                        }
                     }
-                    OutlinedTextField(value = whName, onValueChange = { whName = it }, label = { Text("Webhook name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(
-                        value = whUrl,
-                        onValueChange = { whUrl = it },
-                        label = { Text("HTTPS URL") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                }
+
+                // 4. Login Audit Log
+                item(key = "audit", contentType = "section_audit") {
+                    CollapsibleSection("Login Audit Log (${audit.size})", openAudit, { openAudit = !openAudit }) {
+                        audit.take(25).forEach { e ->
+                            val tone = when (e.outcome) {
+                                "success" -> PillTone.Success
+                                "failed", "rate_limited" -> PillTone.Error
+                                else -> PillTone.Neutral
+                            }
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(e.username ?: e.identifier, style = MaterialTheme.typography.titleSmall)
+                                    StatusPill(e.outcome, tone = tone)
+                                }
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    StatusPill(e.method, tone = PillTone.Primary)
+                                    if (e.ip.isNotBlank()) StatusPill(e.ip, tone = PillTone.Neutral)
+                                    StatusPill(e.createdAt.take(16).replace('T', ' '), tone = PillTone.Neutral)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 5. API Keys (compact bubble cards + full-width Name input row)
+                item(key = "keys", contentType = "section_keys") {
+                    CollapsibleSection(
+                        title = "API Keys (${apiKeys.size})",
+                        expanded = openKeys,
+                        onToggle = { openKeys = !openKeys },
+                        helpText = "Scoped tokens for scripts, home automation, or MCP clients to access this gate without signing in. Each key is restricted to this gate and its assigned role/scopes.",
+                    ) {
+                        ApiKeysSectionContent(
+                            gatePhone = gatePhone,
+                            api = api,
+                            apiKeys = apiKeys,
+                            createdKey = createdKey,
+                            onCreatedKeyChange = { createdKey = it },
+                            onRequestRevokeKey = { revokeKeyTarget = it },
+                            onError = { error = it },
+                            onMessage = onMessage,
+                            onCreated = { refreshApiKeys() },
+                        )
+                    }
+                }
+
+                // 6. Webhooks
+                item(key = "webhooks", contentType = "section_webhooks") {
+                    CollapsibleSection("Webhooks (${webhooks.size})", openWebhooks, { openWebhooks = !openWebhooks }) {
+                        WebhooksSectionContent(
+                            gatePhone = gatePhone,
+                            api = api,
+                            webhooks = webhooks,
+                            onRequestDeleteWebhook = { deleteWebhookTarget = it },
+                            onError = { error = it },
+                            onMessage = onMessage,
+                            onAdded = { refreshWebhooks() },
+                        )
+                    }
+                }
+
+                // 6b. Cameras (full recorder & channel configuration — always visible to admins)
+                item(key = "cameras", contentType = "section_cameras") {
+                    val configuredCount = cameras?.channels?.size ?: 0
+                    val cameraTitle = if (cameras != null) "Cameras ($configuredCount)" else "Cameras"
+                    CollapsibleSection(
+                        title = cameraTitle,
+                        expanded = openCameras,
+                        onToggle = { openCameras = !openCameras },
+                        helpText = "A Dahua/Amcrest recorder reached through Dahua's P2P cloud. After each transactions pull, snapshots or 2-minute clips are saved for matching minutes and shown on Activity. Shared by every account managing this gate; the password is encrypted on the server.",
+                    ) {
+                        CameraSettingsSection(
+                            gatePhone = gatePhone,
+                            api = api,
+                            cameraTestApi = cameraTestApi,
+                            cameras = cameras,
+                            syncVersion = camerasSyncVersion,
+                            gateRelays = gateRelays,
+                            relayLabels = prefs.relayLabels,
+                            onMessage = onMessage,
+                            onCamerasChanged = {
+                                refreshCameras()
+                                onReloadGate()
+                            },
+                        )
+                    }
+                }
+            }
+
+            // 7. Device Association (responsive 2-line rows so 5-digit codes & names never clip at large font scales)
+            item(key = "devices", contentType = "section_devices") {
+                CollapsibleSection(
+                    title = "Device Association",
+                    expanded = openDevices,
+                    onToggle = { openDevices = !openDevices },
+                    helpText = "Friendly names for ranges of card or clicker numbers (for example 00001–00500 = Residents). Shown as the Event Type on the Activity feed.",
+                ) {
+                    repeat(deviceStates.size) { i ->
+                        DeviceAssociationRow(
+                            index = i,
+                            state = deviceStates[i],
+                        )
+                    }
                     Button(
-                        enabled = whName.isNotBlank() && whUrl.startsWith("https://"),
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
                             scope.launch {
+                                val arr = JsonArray(
+                                    deviceStates.map { state ->
+                                        val d = state.value
+                                        buildJsonObject {
+                                            put("name", JsonPrimitive(d.name.trim()))
+                                            put("from", JsonPrimitive(d.from.trim()))
+                                            put("to", JsonPrimitive(d.to.trim()))
+                                        }
+                                    },
+                                )
+                                val body = buildJsonObject { put("deviceAssociation", arr) }
                                 runCatching {
-                                    val res = api.createWebhook(gatePhone, CreateWebhookRequest(whName.trim(), whUrl.trim(), listOf("send.completed", "relay.changed")))
-                                    if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Add webhook failed"))
+                                    val res = api.updatePrefs(gatePhone, body)
+                                    if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Save failed"))
                                 }
-                                    .onSuccess { whName = ""; whUrl = ""; onMessage("Webhook added."); load() }
-                                    .onFailure { error = it.message ?: "Add failed" }
+                                    .onSuccess { onMessage("Device association saved."); refreshPrefs(); onReloadGate() }
+                                    .onFailure { error = it.message ?: "Save failed" }
                             }
                         },
-                    ) { Text("Add webhook") }
+                    ) { Text("Save device association") }
                 }
             }
-            // 6b. Cameras (full recorder & channel configuration — always visible to admins)
-            item(key = "cameras", contentType = "section_cameras") {
-                val configuredCount = cameras?.channels?.size ?: 0
-                val cameraTitle = if (cameras != null) "Cameras ($configuredCount)" else "Cameras"
-                CollapsibleSection(
-                    title = cameraTitle,
-                    expanded = openCameras,
-                    onToggle = { openCameras = !openCameras },
-                    helpText = "A Dahua/Amcrest recorder reached through Dahua's P2P cloud. After each transactions pull, snapshots or 2-minute clips are saved for matching minutes and shown on Activity. Shared by every account managing this gate; the password is encrypted on the server.",
-                ) {
-                    CameraSettingsSection(
-                        form = cameraForm,
-                        hasSavedSettings = cameras != null,
-                        gateRelays = gateRelays,
-                        relayLabels = prefs.relayLabels,
-                        saving = cameraSaving,
-                        testing = cameraTesting,
-                        deleting = cameraDeleting,
-                        statusMessage = cameraStatusMessage,
-                        errorMessage = cameraError,
-                        testResults = cameraTestResults,
-                        onFormChange = { cameraForm = it },
-                        onSave = {
-                            if (shouldConfirmCameraRetention(cameras?.keepDays ?: 0, cameraForm.keepDays)) {
-                                confirmCameraRetention = true
-                            } else {
-                                performCameraSave()
-                            }
-                        },
-                        onTest = {
-                            cameraError = null
-                            cameraTestResults = null
-                            cameraStatusMessage = "Connecting to the recorder… (up to a minute)"
-                            cameraTesting = true
-                            scope.launch {
-                                runCatching {
-                                    val res = api.testCameras(gatePhone)
-                                    if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Test failed"))
-                                    res.body()?.channels.orEmpty()
-                                }
-                                    .onSuccess { results ->
-                                        cameraTesting = false
-                                        cameraTestResults = results
-                                        val okCount = results.count { !it.file.isNullOrBlank() }
-                                        cameraStatusMessage = "Live pictures from $okCount of ${results.size} channel(s)."
-                                    }
-                                    .onFailure {
-                                        cameraTesting = false
-                                        cameraStatusMessage = null
-                                        cameraError = "Test failed: ${it.message ?: "Unable to connect"}"
-                                    }
-                            }
-                        },
-                        onRequestRemove = { confirmRemoveCameras = true },
-                        onRequestDeleteSnapshots = { confirmDeleteSnapshots = true },
-                    )
+
+            // 8. Danger Zone
+            if (isAdmin) {
+                item(key = "danger", contentType = "section_danger") {
+                    CollapsibleSection(
+                        title = "Danger Zone",
+                        expanded = openDanger,
+                        onToggle = { openDanger = !openDanger },
+                        helpText = "Removes everything your DoorKing server has stored for this gate (working copy, history, users, API keys). The physical gate hardware itself is untouched.",
+                    ) {
+                        Text(
+                            "Removes all locally stored data, history, snapshots, and user access for this gate. Nothing on the physical gate changes.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { confirmDeleteGate = true },
+                        ) { Text("Delete all data for this gate…") }
+                    }
                 }
             }
         }
+    }
+}
 
-        // 7. Device Association (responsive 2-line rows so 5-digit codes & names never clip at large font scales)
-        item(key = "devices", contentType = "section_devices") {
-            CollapsibleSection(
-                title = "Device Association",
-                expanded = openDevices,
-                onToggle = { openDevices = !openDevices },
-                helpText = "Friendly names for ranges of card or clicker numbers (for example 00001–00500 = Residents). Shown as the Event Type on the Activity feed.",
+@Composable
+private fun GateLoginSectionContent(
+    gatePhone: String,
+    api: DoorkingApi,
+    login: GateLoginDto?,
+    syncVersion: Int,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onSaved: suspend () -> Unit,
+) {
+    var dksUser by remember(gatePhone, login?.dksUser, syncVersion) { mutableStateOf(login?.dksUser.orEmpty()) }
+    var dksPassword by remember(gatePhone) { mutableStateOf("") }
+    var masterCode by remember(gatePhone) { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    OutlinedTextField(
+        value = dksUser,
+        onValueChange = { dksUser = it },
+        label = { Text("DKS user") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    PasswordOutlinedField(
+        value = dksPassword,
+        onValueChange = { dksPassword = it },
+        label = if (login?.dksPasswordSet == true) "DKS password (blank keeps saved)" else "DKS password",
+        modifier = Modifier.fillMaxWidth(),
+    )
+    PasswordOutlinedField(
+        value = masterCode,
+        onValueChange = { masterCode = it },
+        label = "Master code (4 digits, blank keeps saved)",
+        digitsOnly = true,
+        maxLength = 4,
+        showVisibilityToggle = false,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Button(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = {
+            onError(null)
+            scope.launch {
+                runCatching {
+                    val res = api.updateGateLogin(gatePhone, GateLoginUpdateRequest(dksUser.trim(), dksPassword, masterCode))
+                    if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Save failed"))
+                }
+                    .onSuccess {
+                        dksPassword = ""
+                        masterCode = ""
+                        onMessage("Gate login updated.")
+                        onSaved()
+                    }
+                    .onFailure { onError(it.message ?: "Save failed") }
+            }
+        },
+    ) { Text("Save gate login") }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun GateUsersSectionContent(
+    gatePhone: String,
+    api: DoorkingApi,
+    users: List<GateUserDto>,
+    meUsername: String,
+    onRequestRemoveUser: (GateUserDto) -> Unit,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onShared: suspend () -> Unit,
+) {
+    var shareUser by remember(gatePhone) { mutableStateOf("") }
+    var shareRole by remember(gatePhone) { mutableStateOf("readonly") }
+    val scope = rememberCoroutineScope()
+
+    users.forEach { u ->
+        val roleTone = when (u.role) {
+            "admin" -> PillTone.Primary
+            "editor" -> PillTone.Warning
+            "resident" -> PillTone.Success
+            else -> PillTone.Neutral
+        }
+        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                repeat(deviceStates.size) { i ->
-                    DeviceAssociationRow(
-                        index = i,
-                        state = deviceStates[i],
-                    )
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(u.username, style = MaterialTheme.typography.titleSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatusPill(u.role.replaceFirstChar(Char::uppercase), tone = roleTone)
+                        if (u.invited) StatusPill("Invited", tone = PillTone.Warning)
+                        if (u.email.isNotBlank()) StatusPill(u.email, tone = PillTone.Neutral)
+                    }
                 }
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = {
-                        scope.launch {
-                            val arr = JsonArray(
-                                deviceStates.map { state ->
-                                    val d = state.value
-                                    buildJsonObject {
-                                        put("name", JsonPrimitive(d.name.trim()))
-                                        put("from", JsonPrimitive(d.from.trim()))
-                                        put("to", JsonPrimitive(d.to.trim()))
-                                    }
-                                },
-                            )
-                            val body = buildJsonObject { put("deviceAssociation", arr) }
-                            runCatching {
-                                val res = api.updatePrefs(gatePhone, body)
-                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
-                            }
-                                .onSuccess { onMessage("Device association saved."); onReloadGate() }
-                                .onFailure { error = it.message ?: "Save failed" }
+                if (u.username != meUsername) {
+                    IconButton(onClick = { onRequestRemoveUser(u) }) {
+                        Icon(Icons.Rounded.Delete, contentDescription = "Remove ${u.username}", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+    }
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = shareUser,
+            onValueChange = { shareUser = it },
+            label = { Text("Share with username") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            enabled = shareUser.isNotBlank(),
+            onClick = {
+                scope.launch {
+                    runCatching {
+                        val res = api.shareGate(gatePhone, ShareGateRequest(shareUser.trim(), shareRole))
+                        if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Share failed"))
+                    }
+                        .onSuccess {
+                            shareUser = ""
+                            onMessage("Gate shared.")
+                            onShared()
                         }
-                    },
-                ) { Text("Save device association") }
+                        .onFailure { onError(it.message ?: "Share failed") }
+                }
+            },
+        ) { Text("Share") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        GATE_ROLE_OPTIONS.forEach { r ->
+            FilterChip(selected = shareRole == r, onClick = { shareRole = r }, label = { Text(r.replaceFirstChar(Char::uppercase)) })
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ApiKeysSectionContent(
+    gatePhone: String,
+    api: DoorkingApi,
+    apiKeys: List<ApiKeyInfoDto>,
+    createdKey: Pair<String, String>?,
+    onCreatedKeyChange: (Pair<String, String>?) -> Unit,
+    onRequestRevokeKey: (ApiKeyInfoDto) -> Unit,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onCreated: suspend () -> Unit,
+) {
+    var keyName by remember(gatePhone) { mutableStateOf("") }
+    var keyRole by remember(gatePhone) { mutableStateOf("readonly") }
+    var keyScopePreset by remember(gatePhone) { mutableStateOf("full") }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    if (createdKey != null) {
+        BubbleCard(containerColor = MaterialTheme.colorScheme.primaryContainer) {
+            Text("Key \"${createdKey.first}\" created — copy now:", style = MaterialTheme.typography.titleSmall)
+            Text(createdKey.second, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clip.setPrimaryClip(ClipData.newPlainText("DoorKing API Key", createdKey.second))
+                    onMessage("API key copied.")
+                }) {
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                    Text("Copy", modifier = Modifier.padding(start = 4.dp))
+                }
+                TextButton(onClick = { onCreatedKeyChange(null) }) { Text("Done") }
             }
         }
+    }
+    apiKeys.forEach { k ->
+        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(k.name, style = MaterialTheme.typography.titleSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatusPill(k.role.replaceFirstChar(Char::uppercase), tone = if (k.role == "admin") PillTone.Primary else PillTone.Neutral)
+                        if (!k.scopes.isNullOrEmpty()) {
+                            StatusPill("Scoped (${k.scopes.size})", tone = PillTone.Primary)
+                        }
+                        StatusPill(k.lastUsedAt?.take(10)?.let { "Used $it" } ?: "Unused", tone = PillTone.Neutral)
+                    }
+                }
+                OutlinedButton(
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    onClick = { onRequestRevokeKey(k) },
+                ) { Text("Revoke") }
+            }
+        }
+    }
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = keyName,
+            onValueChange = { keyName = it.take(40) },
+            label = { Text("New key name") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            enabled = keyName.isNotBlank(),
+            onClick = {
+                scope.launch {
+                    runCatching {
+                        val selectedScopes = when (keyScopePreset) {
+                            "mcpRead" -> MCP_READ_SCOPES
+                            "mcpStaging" -> MCP_STAGING_SCOPES
+                            else -> null
+                        }
+                        val res = api.createApiKey(gatePhone, CreateApiKeyRequest(keyName.trim(), keyRole, 0, selectedScopes))
+                        if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Create failed"))
+                        res.body()!!
+                    }
+                        .onSuccess { created ->
+                            onCreatedKeyChange(created.apiKey.name to created.key)
+                            keyName = ""
+                            keyScopePreset = "full"
+                            onCreated()
+                        }
+                        .onFailure { onError(it.message ?: "Create failed") }
+                }
+            },
+        ) { Text("Create") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        GATE_ROLE_OPTIONS.forEach { r ->
+            FilterChip(selected = keyRole == r, onClick = { keyRole = r }, label = { Text(r.replaceFirstChar(Char::uppercase)) })
+        }
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        API_KEY_SCOPE_PRESETS.forEach { (presetKey, label) ->
+            FilterChip(
+                selected = keyScopePreset == presetKey,
+                onClick = {
+                    keyScopePreset = presetKey
+                    if (presetKey == "mcpStaging" && keyRole == "readonly") keyRole = "editor"
+                },
+                label = { Text(label) },
+            )
+        }
+    }
+}
 
-        // 8. Danger Zone
-        if (isAdmin) {
-            item(key = "danger", contentType = "section_danger") {
-                CollapsibleSection(
-                    title = "Danger Zone",
-                    expanded = openDanger,
-                    onToggle = { openDanger = !openDanger },
-                    helpText = "Removes everything your DoorKing server has stored for this gate (working copy, history, users, API keys). The physical gate hardware itself is untouched.",
-                ) {
-                    Text(
-                        "Removes all locally stored data, history, snapshots, and user access for this gate. Nothing on the physical gate changes.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Button(
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = { confirmDeleteGate = true },
-                    ) { Text("Delete all data for this gate…") }
+@Composable
+private fun WebhooksSectionContent(
+    gatePhone: String,
+    api: DoorkingApi,
+    webhooks: List<WebhookInfoDto>,
+    onRequestDeleteWebhook: (WebhookInfoDto) -> Unit,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onAdded: suspend () -> Unit,
+) {
+    var whName by remember(gatePhone) { mutableStateOf("") }
+    var whUrl by remember(gatePhone) { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    webhooks.forEach { w ->
+        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(w.name, style = MaterialTheme.typography.titleSmall)
+                    Text(w.url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = {
+                        scope.launch {
+                            runCatching { api.testWebhook(gatePhone, w.id) }
+                                .onSuccess { onMessage("Test webhook sent.") }
+                                .onFailure { onError(ApiClientFactory.parseErrorMessage(it)) }
+                        }
+                    }) { Text("Test") }
+                    IconButton(onClick = { onRequestDeleteWebhook(w) }) {
+                        Icon(Icons.Rounded.Delete, contentDescription = "Delete webhook ${w.name}", tint = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }
     }
-    }
+    OutlinedTextField(
+        value = whName,
+        onValueChange = { whName = it },
+        label = { Text("Webhook name") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = whUrl,
+        onValueChange = { whUrl = it },
+        label = { Text("HTTPS URL") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Button(
+        enabled = whName.isNotBlank() && whUrl.startsWith("https://"),
+        modifier = Modifier.fillMaxWidth(),
+        onClick = {
+            scope.launch {
+                runCatching {
+                    val res = api.createWebhook(gatePhone, CreateWebhookRequest(whName.trim(), whUrl.trim(), DEFAULT_WEBHOOK_EVENTS))
+                    if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Add webhook failed"))
+                }
+                    .onSuccess {
+                        whName = ""
+                        whUrl = ""
+                        onMessage("Webhook added.")
+                        onAdded()
+                    }
+                    .onFailure { onError(it.message ?: "Add failed") }
+            }
+        },
+    ) { Text("Add webhook") }
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun CameraSettingsSection(
-    form: CameraFormState,
-    hasSavedSettings: Boolean,
+    gatePhone: String,
+    api: DoorkingApi,
+    cameraTestApi: DoorkingApi,
+    cameras: CameraSettingsDto?,
+    syncVersion: Int,
     gateRelays: List<Int>,
     relayLabels: Map<String, String>,
-    saving: Boolean,
-    testing: Boolean,
-    deleting: Boolean,
-    statusMessage: String?,
-    errorMessage: String?,
-    testResults: List<CameraTestChannelDto>?,
-    onFormChange: (CameraFormState) -> Unit,
-    onSave: () -> Unit,
-    onTest: () -> Unit,
-    onRequestRemove: () -> Unit,
-    onRequestDeleteSnapshots: () -> Unit,
+    onMessage: (String) -> Unit,
+    onCamerasChanged: suspend () -> Unit,
 ) {
+    var form by remember(gatePhone, cameras, syncVersion) { mutableStateOf(cameraFormStateFrom(cameras)) }
+    var saving by remember(gatePhone) { mutableStateOf(false) }
+    var testing by remember(gatePhone) { mutableStateOf(false) }
+    var deleting by remember(gatePhone) { mutableStateOf(false) }
+    var statusMessage by remember(gatePhone) { mutableStateOf<String?>(null) }
+    var errorMessage by remember(gatePhone) { mutableStateOf<String?>(null) }
+    var testResults by remember(gatePhone) { mutableStateOf<List<CameraTestChannelDto>?>(null) }
+    var confirmRetention by remember(gatePhone) { mutableStateOf(false) }
+    var confirmDeleteCamera by remember(gatePhone) { mutableStateOf(false) }
+    var confirmDeleteSnapshots by remember(gatePhone) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    val hasSavedSettings = cameras != null
     val busy = saving || testing || deleting
     val isVideo = form.mode == "video"
+
+    fun performSave() {
+        errorMessage = null
+        statusMessage = null
+        saving = true
+        val payload = buildCameraSettingsPayload(form)
+        scope.launch {
+            runCatching {
+                val res = api.saveCameras(gatePhone, payload)
+                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Save failed"))
+            }
+                .onSuccess {
+                    saving = false
+                    form = form.copy(password = "")
+                    statusMessage = "Saved. Use Test cameras to verify the login and channels."
+                    onMessage("Camera settings saved.")
+                    onCamerasChanged()
+                }
+                .onFailure {
+                    saving = false
+                    errorMessage = it.message ?: "Save failed"
+                }
+        }
+    }
+
+    if (confirmRetention) {
+        val keep = form.keepDays
+        AlertDialog(
+            onDismissRequest = { confirmRetention = false },
+            title = { Text("Keep pictures for $keep days?") },
+            text = { Text("Pictures and videos older than $keep days are deleted now, and each day from then on. This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmRetention = false
+                        performSave()
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRetention = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmDeleteCamera) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteCamera = false },
+            title = { Text("Remove camera settings?") },
+            text = { Text("Removes the recorder credentials and channel settings for this gate. Saved snapshots are kept.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmDeleteCamera = false
+                        errorMessage = null
+                        statusMessage = null
+                        deleting = true
+                        scope.launch {
+                            runCatching {
+                                val res = api.deleteCameras(gatePhone)
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Remove failed"))
+                            }
+                                .onSuccess {
+                                    deleting = false
+                                    testResults = null
+                                    statusMessage = "Camera settings removed."
+                                    onMessage("Camera settings removed.")
+                                    onCamerasChanged()
+                                }
+                                .onFailure {
+                                    deleting = false
+                                    errorMessage = it.message ?: "Remove failed"
+                                }
+                        }
+                    },
+                ) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteCamera = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmDeleteSnapshots) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSnapshots = false },
+            title = { Text("Delete all saved snapshots?") },
+            text = { Text("Permanently deletes every saved picture and video for this gate. This cannot be undone. Transactions still in the backfill window get new pictures on the next snapshot run.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmDeleteSnapshots = false
+                        errorMessage = null
+                        statusMessage = null
+                        deleting = true
+                        scope.launch {
+                            runCatching {
+                                val res = api.deleteAllSnapshots(gatePhone)
+                                if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Delete failed"))
+                                res.body()
+                            }
+                                .onSuccess { reply ->
+                                    deleting = false
+                                    testResults = null
+                                    val files = reply?.files ?: 0
+                                    val minutes = reply?.minutes ?: 0
+                                    val summary = "Deleted $files file(s) across $minutes minute(s)."
+                                    statusMessage = summary
+                                    onMessage(summary)
+                                    onCamerasChanged()
+                                }
+                                .onFailure {
+                                    deleting = false
+                                    errorMessage = it.message ?: "Delete failed"
+                                }
+                        }
+                    },
+                ) { Text("Delete all") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteSnapshots = false }) { Text("Cancel") } },
+        )
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1209,13 +1347,13 @@ private fun CameraSettingsSection(
         )
         Switch(
             checked = form.enabled,
-            onCheckedChange = { onFormChange(form.copy(enabled = it)) },
+            onCheckedChange = { form = form.copy(enabled = it) },
         )
     }
 
     OutlinedTextField(
         value = form.serial,
-        onValueChange = { onFormChange(form.copy(serial = it.take(32))) },
+        onValueChange = { form = form.copy(serial = it.take(32)) },
         label = { Text("Recorder serial") },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
@@ -1224,7 +1362,7 @@ private fun CameraSettingsSection(
 
     OutlinedTextField(
         value = form.username,
-        onValueChange = { onFormChange(form.copy(username = it.take(64))) },
+        onValueChange = { form = form.copy(username = it.take(64)) },
         label = { Text("Recorder username") },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
@@ -1233,7 +1371,7 @@ private fun CameraSettingsSection(
 
     PasswordOutlinedField(
         value = form.password,
-        onValueChange = { onFormChange(form.copy(password = it)) },
+        onValueChange = { form = form.copy(password = it) },
         label = if (hasSavedSettings) "Recorder password (blank keeps saved)" else "Recorder password",
         modifier = Modifier.fillMaxWidth(),
     )
@@ -1242,7 +1380,7 @@ private fun CameraSettingsSection(
         value = form.clockOffset,
         onValueChange = { raw ->
             val filtered = raw.filterIndexed { idx, ch -> ch.isDigit() || (ch == '-' && idx == 0) }.take(6)
-            onFormChange(form.copy(clockOffset = filtered))
+            form = form.copy(clockOffset = filtered)
         },
         label = { Text("Clock offset (seconds)") },
         supportingText = { Text("Added to the gate's transaction time to match the recorder's clock.") },
@@ -1260,7 +1398,7 @@ private fun CameraSettingsSection(
             CAMERA_MODE_OPTIONS.forEachIndexed { idx, (modeValue, label) ->
                 SegmentedButton(
                     selected = form.mode == modeValue,
-                    onClick = { onFormChange(form.copy(mode = modeValue)) },
+                    onClick = { form = form.copy(mode = modeValue) },
                     shape = SegmentedButtonDefaults.itemShape(index = idx, count = CAMERA_MODE_OPTIONS.size),
                     border = NO_SEGMENT_BORDER,
                     colors = SegmentedButtonDefaults.colors(
@@ -1281,7 +1419,7 @@ private fun CameraSettingsSection(
                 CAMERA_FRAME_OPTIONS.forEach { count ->
                     FilterChip(
                         selected = form.frames == count,
-                        onClick = { onFormChange(form.copy(frames = count)) },
+                        onClick = { form = form.copy(frames = count) },
                         label = { Text(count.toString()) },
                     )
                 }
@@ -1294,7 +1432,7 @@ private fun CameraSettingsSection(
                 CAMERA_FRAMES_AFTER_OPTIONS.forEach { count ->
                     FilterChip(
                         selected = form.framesAfter == count,
-                        onClick = { onFormChange(form.copy(framesAfter = count)) },
+                        onClick = { form = form.copy(framesAfter = count) },
                         label = { Text(count.toString()) },
                     )
                 }
@@ -1307,7 +1445,7 @@ private fun CameraSettingsSection(
                 CAMERA_CLIP_TRIES_OPTIONS.forEach { tries ->
                     FilterChip(
                         selected = form.clipTries == tries,
-                        onClick = { onFormChange(form.copy(clipTries = tries)) },
+                        onClick = { form = form.copy(clipTries = tries) },
                         label = { Text(tries.toString()) },
                     )
                 }
@@ -1326,7 +1464,7 @@ private fun CameraSettingsSection(
             CAMERA_EVENT_OPTIONS.forEach { (eventValue, label) ->
                 FilterChip(
                     selected = form.events == eventValue,
-                    onClick = { onFormChange(form.copy(events = eventValue)) },
+                    onClick = { form = form.copy(events = eventValue) },
                     label = { Text(label) },
                 )
             }
@@ -1339,7 +1477,7 @@ private fun CameraSettingsSection(
             CAMERA_KEEP_DAYS_OPTIONS.forEach { (days, label) ->
                 FilterChip(
                     selected = form.keepDays == days,
-                    onClick = { onFormChange(form.copy(keepDays = days)) },
+                    onClick = { form = form.copy(keepDays = days) },
                     label = { Text(label) },
                 )
             }
@@ -1349,7 +1487,7 @@ private fun CameraSettingsSection(
     OutlinedTextField(
         value = form.backfillHours,
         onValueChange = { raw ->
-            onFormChange(form.copy(backfillHours = raw.filter(Char::isDigit).take(3)))
+            form = form.copy(backfillHours = raw.filter(Char::isDigit).take(3))
         },
         label = { Text("Backfill window (hours)") },
         supportingText = { Text("0–720 hours to look back when pulling transactions.") },
@@ -1376,7 +1514,7 @@ private fun CameraSettingsSection(
                         onValueChange = { raw ->
                             val updated = form.channels.toMutableList()
                             updated[idx] = row.copy(channel = raw.filter(Char::isDigit).take(2))
-                            onFormChange(form.copy(channels = updated))
+                            form = form.copy(channels = updated)
                         },
                         label = { Text("Ch #") },
                         singleLine = true,
@@ -1388,7 +1526,7 @@ private fun CameraSettingsSection(
                         onValueChange = { raw ->
                             val updated = form.channels.toMutableList()
                             updated[idx] = row.copy(name = raw.take(40))
-                            onFormChange(form.copy(channels = updated))
+                            form = form.copy(channels = updated)
                         },
                         label = { Text("Camera name") },
                         singleLine = true,
@@ -1399,7 +1537,7 @@ private fun CameraSettingsSection(
                         onClick = {
                             val updated = form.channels.toMutableList()
                             updated.removeAt(idx)
-                            onFormChange(form.copy(channels = updated))
+                            form = form.copy(channels = updated)
                         },
                     ) {
                         Icon(
@@ -1423,7 +1561,7 @@ private fun CameraSettingsSection(
                             onClick = {
                                 val updated = form.channels.toMutableList()
                                 updated[idx] = row.copy(relays = emptyList())
-                                onFormChange(form.copy(channels = updated))
+                                form = form.copy(channels = updated)
                             },
                             label = { Text("All relays") },
                         )
@@ -1439,7 +1577,7 @@ private fun CameraSettingsSection(
                                     }
                                     val updated = form.channels.toMutableList()
                                     updated[idx] = row.copy(relays = nextRelays)
-                                    onFormChange(form.copy(channels = updated))
+                                    form = form.copy(channels = updated)
                                 },
                                 label = { Text(relayDisplayName(relayLabels, relay)) },
                             )
@@ -1451,7 +1589,7 @@ private fun CameraSettingsSection(
         if (form.channels.size < MAX_CAMERA_CHANNELS) {
             OutlinedButton(
                 onClick = {
-                    onFormChange(form.copy(channels = form.channels + CameraChannelFormRow()))
+                    form = form.copy(channels = form.channels + CameraChannelFormRow())
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -1463,7 +1601,13 @@ private fun CameraSettingsSection(
     }
 
     Button(
-        onClick = onSave,
+        onClick = {
+            if (shouldConfirmCameraRetention(cameras?.keepDays ?: 0, form.keepDays)) {
+                confirmRetention = true
+            } else {
+                performSave()
+            }
+        },
         enabled = !busy,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -1477,7 +1621,30 @@ private fun CameraSettingsSection(
     }
 
     FilledTonalButton(
-        onClick = onTest,
+        onClick = {
+            errorMessage = null
+            testResults = null
+            statusMessage = "Connecting to the recorder… (up to a minute)"
+            testing = true
+            scope.launch {
+                runCatching {
+                    val res = cameraTestApi.testCameras(gatePhone)
+                    if (!res.isSuccessful) error(parseSystemApiError(res.errorBody()?.string(), res.code(), "Test failed"))
+                    res.body()?.channels.orEmpty()
+                }
+                    .onSuccess { results ->
+                        testing = false
+                        testResults = results
+                        val okCount = results.count { !it.file.isNullOrBlank() }
+                        statusMessage = "Live pictures from $okCount of ${results.size} channel(s)."
+                    }
+                    .onFailure {
+                        testing = false
+                        statusMessage = null
+                        errorMessage = "Test failed: ${it.message ?: "Unable to connect"}"
+                    }
+            }
+        },
         enabled = hasSavedSettings && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -1491,7 +1658,7 @@ private fun CameraSettingsSection(
     }
 
     OutlinedButton(
-        onClick = onRequestRemove,
+        onClick = { confirmDeleteCamera = true },
         enabled = hasSavedSettings && !busy,
         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
         modifier = Modifier.fillMaxWidth(),
@@ -1500,7 +1667,7 @@ private fun CameraSettingsSection(
     }
 
     OutlinedButton(
-        onClick = onRequestDeleteSnapshots,
+        onClick = { confirmDeleteSnapshots = true },
         enabled = hasSavedSettings && !busy,
         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
         modifier = Modifier.fillMaxWidth(),
@@ -1508,22 +1675,22 @@ private fun CameraSettingsSection(
         Text("Delete all snapshots")
     }
 
-    if (!statusMessage.isNullOrBlank()) {
+    statusMessage?.takeIf { it.isNotBlank() }?.let { msg ->
         Text(
-            text = statusMessage,
+            text = msg,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 
-    if (!errorMessage.isNullOrBlank()) {
-        ErrorBanner(errorMessage)
+    errorMessage?.takeIf { it.isNotBlank() }?.let { err ->
+        ErrorBanner(err)
     }
 
-    if (!testResults.isNullOrEmpty()) {
+    testResults?.takeIf { it.isNotEmpty() }?.let { results ->
         BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
             Text("Test results", style = MaterialTheme.typography.titleSmall)
-            testResults.forEach { ch ->
+            results.forEach { ch ->
                 val ok = !ch.file.isNullOrBlank()
                 val label = ch.name.ifBlank { "Channel ${ch.channel}" }
                 Row(

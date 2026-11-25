@@ -84,6 +84,7 @@ import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.feature.auth.AcceptInviteScreen
 import com.doorking.gate.feature.auth.ForcedPasswordChangeScreen
+import com.doorking.gate.feature.auth.ParsedInviteLink
 import com.doorking.gate.feature.auth.SignInScreen
 import com.doorking.gate.feature.auth.parseInviteDeepLink
 import com.doorking.gate.feature.gates.GatePickerScreen
@@ -97,8 +98,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Type-safe Navigation 3 top-level destinations. */
 sealed interface AppRoute {
@@ -175,17 +178,23 @@ class SessionBootstrapViewModel(
         }
         if (inviteLinks != null) {
             viewModelScope.launch {
+                bootstrap.first { it !is BootstrapState.Loading }
                 inviteLinks.collect { uri ->
                     (inviteLinks as? MutableSharedFlow<Uri>)?.resetReplayCache()
                     val parsed = parseInviteDeepLink(uri) ?: return@collect
-                    val currentSession = (_bootstrap.value as? BootstrapState.Ready)?.session
-                    _bootstrap.value = BootstrapState.Ready(
-                        AppRoute.AcceptInvite(parsed.serverUrl, parsed.token),
-                        currentSession,
-                    )
+                    handleParsedInvite(parsed)
                 }
             }
         }
+    }
+
+    internal suspend fun handleParsedInvite(parsed: ParsedInviteLink) {
+        val readyState = bootstrap.first { it !is BootstrapState.Loading }
+        val currentSession = (readyState as? BootstrapState.Ready)?.session
+        _bootstrap.value = BootstrapState.Ready(
+            AppRoute.AcceptInvite(parsed.serverUrl, parsed.token),
+            currentSession,
+        )
     }
 
     internal suspend fun handleSsoCallbackParams(code: String?, errParam: String?) {
@@ -194,8 +203,9 @@ class SessionBootstrapViewModel(
             // Ignore unsolicited external sso/callback intents when no SSO sign-in is in flight.
             return
         }
-        pendingSsoVerifier = null
         if (!errParam.isNullOrBlank()) {
+            // Do not clear pendingSsoVerifier on an unverified error callback so a rogue app
+            // cannot abort an in-flight SSO login before the real code callback arrives.
             _ssoError.value = mapSsoErrorMessage(errParam)
             return
         }
@@ -203,6 +213,7 @@ class SessionBootstrapViewModel(
             _ssoError.value = "Single sign-in session could not be verified. Try again."
             return
         }
+        pendingSsoVerifier = null
         _ssoError.value = null
         _bootstrap.value = BootstrapState.Loading
         runCatching {
@@ -237,7 +248,8 @@ class SessionBootstrapViewModel(
 
     private fun refreshSessionInternal(syncWidgetsOnLogin: Boolean) {
         viewModelScope.launch {
-            runCatching { Trace.beginSection("Doorking:refreshSession") }
+            val traceCookie = refreshTraceCookie.getAndIncrement()
+            runCatching { Trace.beginAsyncSection("Doorking:refreshSession", traceCookie) }
             try {
                 _bootstrap.value = BootstrapState.Loading
                 val stored = sessionStorage.awaitLoaded()
@@ -260,7 +272,7 @@ class SessionBootstrapViewModel(
                         _bootstrap.value = BootstrapState.OfflineError(ApiClientFactory.parseErrorMessage(err))
                     }
             } finally {
-                runCatching { Trace.endSection() }
+                runCatching { Trace.endAsyncSection("Doorking:refreshSession", traceCookie) }
             }
         }
     }
@@ -497,11 +509,14 @@ class SessionBootstrapViewModel(
      * already registered and valid.
      */
     suspend fun ensureBiometricKeyRegistered(context: Context) {
-        if (!BiometricUnlockManager.isStrongBiometricAvailable(context)) return
+        val strongAvailable = withContext(Dispatchers.IO) {
+            BiometricUnlockManager.isStrongBiometricAvailable(context)
+        }
+        if (!strongAvailable) return
         val existingId = sessionStorage.state.value.biometricKeyId
-        if (!existingId.isNullOrBlank() && BiometricKeyManager.initSigningCrypto() != null) return
+        if (!existingId.isNullOrBlank() && withContext(Dispatchers.IO) { BiometricKeyManager.initSigningCrypto() != null }) return
         runCatching {
-            val mat = BiometricKeyManager.generateFreshKey()
+            val mat = withContext(Dispatchers.IO) { BiometricKeyManager.generateFreshKey() }
             val res = api.registerBiometricKey(
                 RegisterBiometricKeyRequest(
                     keyId = mat.keyId,
@@ -613,6 +628,8 @@ class SessionBootstrapViewModel(
     }
 
     companion object {
+        private val refreshTraceCookie = AtomicInteger(1)
+
         internal fun defaultPasskeyLabel(): String =
             listOfNotNull(Build.MANUFACTURER?.trim(), Build.MODEL?.trim())
                 .filter { it.isNotBlank() }
@@ -663,7 +680,11 @@ class SessionBootstrapViewModel(
                     inviteLinks = container.inviteLinks,
                     onWidgetSync = { GateWidgetUpdater.enqueueSync(container.appContext) },
                     onBeforeSignOut = {
-                        FirebaseHelper.unregisterCurrentDevice(container.appContext, container.api)
+                        FirebaseHelper.unregisterCurrentDevice(
+                            container.appContext,
+                            container.api,
+                            container.sessionStorage,
+                        )
                     },
                     stepUpApi = container.stepUpApi,
                 ) as T
@@ -673,7 +694,8 @@ class SessionBootstrapViewModel(
 
 @Composable
 fun DoorkingNavRoot(container: AppContainer) {
-    val vm: SessionBootstrapViewModel = viewModel(factory = SessionBootstrapViewModel.factory(container))
+    val factory = remember(container) { SessionBootstrapViewModel.factory(container) }
+    val vm: SessionBootstrapViewModel = viewModel(factory = factory)
     val bootstrap by vm.bootstrap.collectAsStateWithLifecycle()
     val ssoError by vm.ssoError.collectAsStateWithLifecycle()
     val storedAuth by container.sessionStorage.state.collectAsStateWithLifecycle()

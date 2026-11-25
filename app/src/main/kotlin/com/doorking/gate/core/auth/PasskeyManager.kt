@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Distinguishes a genuine user dismissal of the Credential Manager sheet from Play Services
@@ -207,7 +208,7 @@ class UiStepUpCoordinator : StepUpCoordinator {
         val deferred = CompletableDeferred<Boolean>()
         _pending.value = PendingStepUp(error = error, deferred = deferred)
         try {
-            deferred.await()
+            withTimeoutOrNull(STEP_UP_TIMEOUT_MS) { deferred.await() } ?: false
         } finally {
             _pending.value = null
         }
@@ -215,5 +216,9 @@ class UiStepUpCoordinator : StepUpCoordinator {
 
     fun resolve(confirmed: Boolean) {
         _pending.value?.deferred?.complete(confirmed)
+    }
+
+    companion object {
+        const val STEP_UP_TIMEOUT_MS = 120_000L
     }
 }

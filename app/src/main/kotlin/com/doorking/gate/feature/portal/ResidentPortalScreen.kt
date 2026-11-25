@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -79,7 +80,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -118,6 +118,14 @@ private enum class PortalTab(val label: String) {
     Account("Account"),
 }
 
+private val BUZZ_BUTTON_SHAPE = RoundedCornerShape(16.dp)
+private val PORTAL_REQUEST_KINDS = listOf(
+    "phone" to "Update call-box phone number",
+    "hidden" to "Change directory visibility",
+    "cardIssue" to "Lost / damaged remote or card",
+    "other" to "Other request",
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ResidentPortalScreen(
@@ -136,26 +144,31 @@ fun ResidentPortalScreen(
     )
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(PortalTab.Gate) }
-    val tabHistory = remember { mutableStateListOf<PortalTab>() }
+    val tabHistory = remember { ArrayDeque<PortalTab>() }
+    var hasHistory by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
+    ReportDrawnWhen { !state.loading }
+
     fun selectTab(next: PortalTab) {
         if (next == tab) return
         if (tabHistory.lastOrNull() != tab) {
-            tabHistory.add(tab)
+            tabHistory.addLast(tab)
             if (tabHistory.size > 15) {
-                tabHistory.removeAt(0)
+                tabHistory.removeFirst()
             }
+            hasHistory = tabHistory.isNotEmpty()
         }
         tab = next
     }
 
-    BackHandler(enabled = tabHistory.isNotEmpty() || onSwitchToStaff != null) {
+    BackHandler(enabled = hasHistory || onSwitchToStaff != null) {
         if (tabHistory.isNotEmpty()) {
-            tab = tabHistory.removeAt(tabHistory.lastIndex)
+            tab = tabHistory.removeLast()
+            hasHistory = tabHistory.isNotEmpty()
         } else {
             onSwitchToStaff?.invoke()
         }
@@ -169,10 +182,12 @@ fun ResidentPortalScreen(
         }
     }
 
-    LaunchedEffect(state.bannerMessage) {
-        val msg = state.bannerMessage ?: return@LaunchedEffect
-        snackbar.showSnackbar(msg)
-        vm.clearBanner()
+    val bannerMessage = state.bannerMessage
+    if (bannerMessage != null) {
+        LaunchedEffect(bannerMessage) {
+            snackbar.showSnackbar(bannerMessage)
+            vm.clearBanner()
+        }
     }
 
     Scaffold(
@@ -279,7 +294,7 @@ fun ResidentPortalScreen(
                     state = state,
                     serverUrl = container.sessionStorage.currentServerUrl(),
                     gatePhone = gatePhone,
-                    okHttpClient = container.okHttpClient,
+                    okHttpClient = container.mediaOkHttpClient,
                     onReport = vm::reportSuspicious,
                 )
 
@@ -395,7 +410,7 @@ internal fun PortalGateTab(
                         onBuzz(entry.relay, entry.name)
                     },
                     enabled = enabled,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = BUZZ_BUTTON_SHAPE,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = containerColor,
                         contentColor = contentColor,
@@ -723,14 +738,8 @@ private fun PortalRequestsTab(
     state: ResidentPortalUiState,
     onSubmit: (kind: String, phone: String, note: String, onDone: () -> Unit) -> Unit,
 ) {
-    val kinds = listOf(
-        "phone" to "Update call-box phone number",
-        "hidden" to "Change directory visibility",
-        "cardIssue" to "Lost / damaged remote or card",
-        "other" to "Other request",
-    )
     var kindExpanded by remember { mutableStateOf(false) }
-    var selectedKind by remember { mutableStateOf(kinds.first().first) }
+    var selectedKind by remember { mutableStateOf(PORTAL_REQUEST_KINDS.first().first) }
     var phone by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
 
@@ -749,7 +758,7 @@ private fun PortalRequestsTab(
                         onExpandedChange = { kindExpanded = !kindExpanded },
                     ) {
                         OutlinedTextField(
-                            value = kinds.firstOrNull { it.first == selectedKind }?.second ?: selectedKind,
+                            value = PORTAL_REQUEST_KINDS.firstOrNull { it.first == selectedKind }?.second ?: selectedKind,
                             onValueChange = {},
                             readOnly = true,
                             label = { Text("Request type") },
@@ -759,7 +768,7 @@ private fun PortalRequestsTab(
                                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
                         )
                         ExposedDropdownMenu(expanded = kindExpanded, onDismissRequest = { kindExpanded = false }) {
-                            kinds.forEach { (id, label) ->
+                            PORTAL_REQUEST_KINDS.forEach { (id, label) ->
                                 DropdownMenuItem(
                                     text = { Text(label) },
                                     onClick = { selectedKind = id; kindExpanded = false },

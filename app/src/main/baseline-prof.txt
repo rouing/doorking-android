@@ -1,39 +1,55 @@
 # Baseline Profile rules for DoorKing Gate Manager (com.doorking.gate)
-# Pre-compiles startup, authentication, navigation, Staff Directory/Transactions,
-# Resident Portal, and Glance widget code paths via ART + androidx.profileinstaller.
+# Marks only true cold-start classes/methods with S (Startup) and compiles secondary
+# interactive flows as HPL (Hot + Post-startup) via ART + androidx.profileinstaller.
 
-# Startup & application bootstrap
+# Cold-start bootstrap
 Lcom/doorking/gate/DoorkingApp;
 HSPLcom/doorking/gate/DoorkingApp;->**(**)**
+Lcom/doorking/gate/DoorkingApp$*;
+HSPLcom/doorking/gate/DoorkingApp$*;->**(**)**
 Lcom/doorking/gate/AppContainer;
 HSPLcom/doorking/gate/AppContainer;->**(**)**
+Lcom/doorking/gate/AppContainer$*;
+HSPLcom/doorking/gate/AppContainer$*;->**(**)**
 Lcom/doorking/gate/MainActivity;
 HSPLcom/doorking/gate/MainActivity;->**(**)**
+Lcom/doorking/gate/MainActivity$*;
+HSPLcom/doorking/gate/MainActivity$*;->**(**)**
+Lcom/doorking/gate/MainActivityKt;
+HSPLcom/doorking/gate/MainActivityKt;->**(**)**
+Lcom/doorking/gate/MainActivityKt$*;
+HSPLcom/doorking/gate/MainActivityKt$*;->**(**)**
 
-# Core auth, networking, theming & UI components
-Lcom/doorking/gate/core/auth/**;
-HSPLcom/doorking/gate/core/auth/**->**(**)**
-Lcom/doorking/gate/core/network/**;
-HSPLcom/doorking/gate/core/network/**->**(**)**
+# Cold-start session store & keystore cipher
+Lcom/doorking/gate/core/auth/SessionStore*;
+HSPLcom/doorking/gate/core/auth/SessionStore*;->**(**)**
+Lcom/doorking/gate/core/auth/SessionStorage*;
+HSPLcom/doorking/gate/core/auth/SessionStorage*;->**(**)**
+Lcom/doorking/gate/core/auth/EncryptedSessionStore*;
+HSPLcom/doorking/gate/core/auth/EncryptedSessionStore*;->**(**)**
+Lcom/doorking/gate/core/auth/StoredAuthState*;
+HSPLcom/doorking/gate/core/auth/StoredAuthState*;->**(**)**
+Lcom/doorking/gate/core/auth/ThemeMode*;
+HSPLcom/doorking/gate/core/auth/ThemeMode*;->**(**)**
+Lcom/doorking/gate/core/auth/CryptoBox*;
+HSPLcom/doorking/gate/core/auth/CryptoBox*;->**(**)**
+Lcom/doorking/gate/core/auth/TokenCipher*;
+HSPLcom/doorking/gate/core/auth/TokenCipher*;->**(**)**
+Lcom/doorking/gate/core/auth/KeystoreTokenCipher*;
+HSPLcom/doorking/gate/core/auth/KeystoreTokenCipher*;->**(**)**
+
+# Cold-start theming & navigation
 Lcom/doorking/gate/core/ui/theme/**;
 HSPLcom/doorking/gate/core/ui/theme/**->**(**)**
-Lcom/doorking/gate/core/ui/components/**;
-HSPLcom/doorking/gate/core/ui/components/**->**(**)**
-
-# Navigation
 Lcom/doorking/gate/navigation/**;
 HSPLcom/doorking/gate/navigation/**->**(**)**
 
-# Primary user flows (Auth, Gate Picker, Resident Portal, Staff Directory & Transactions)
-Lcom/doorking/gate/feature/auth/**;
-HSPLcom/doorking/gate/feature/auth/**->**(**)**
-Lcom/doorking/gate/feature/gates/**;
-HSPLcom/doorking/gate/feature/gates/**->**(**)**
-Lcom/doorking/gate/feature/portal/**;
-HSPLcom/doorking/gate/feature/portal/**->**(**)**
-Lcom/doorking/gate/feature/staff/**;
-HSPLcom/doorking/gate/feature/staff/**->**(**)**
-
-# Glance home-screen widgets
-Lcom/doorking/gate/widget/**;
-HSPLcom/doorking/gate/widget/**->**(**)**
+# Post-startup hot paths (no S flag)
+HPLcom/doorking/gate/core/auth/**->**(**)**
+HPLcom/doorking/gate/core/network/**->**(**)**
+HPLcom/doorking/gate/core/ui/components/**->**(**)**
+HPLcom/doorking/gate/feature/auth/**->**(**)**
+HPLcom/doorking/gate/feature/gates/**->**(**)**
+HPLcom/doorking/gate/feature/portal/**->**(**)**
+HPLcom/doorking/gate/feature/staff/**->**(**)**
+HPLcom/doorking/gate/widget/**->**(**)**

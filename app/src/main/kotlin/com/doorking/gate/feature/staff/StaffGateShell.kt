@@ -1,6 +1,7 @@
 package com.doorking.gate.feature.staff
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -65,7 +66,6 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -118,6 +118,11 @@ private sealed interface MoreSubScreen {
     data object Account : MoreSubScreen
 }
 
+private data class NavHistoryEntry(
+    val tab: StaffTab,
+    val subScreen: MoreSubScreen?,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StaffGateShell(
@@ -138,7 +143,8 @@ fun StaffGateShell(
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(StaffTab.Residents) }
     var subScreen by remember { mutableStateOf<MoreSubScreen?>(null) }
-    val navHistory = remember { mutableStateListOf<Pair<StaffTab, MoreSubScreen?>>() }
+    val navHistory = remember { ArrayDeque<NavHistoryEntry>() }
+    var hasHistory by remember { mutableStateOf(false) }
     var draftActions by remember { mutableStateOf<SettingsDraftActions?>(null) }
     var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showGateSheet by remember { mutableStateOf(false) }
@@ -176,12 +182,13 @@ fun StaffGateShell(
     fun navigateTo(nextTab: StaffTab, nextSub: MoreSubScreen? = null) {
         if (nextTab == tab && nextSub == subScreen) return
         navigateGuarded {
-            val current = tab to subScreen
+            val current = NavHistoryEntry(tab, subScreen)
             if (navHistory.lastOrNull() != current) {
-                navHistory.add(current)
+                navHistory.addLast(current)
                 if (navHistory.size > 25) {
-                    navHistory.removeAt(0)
+                    navHistory.removeFirst()
                 }
+                hasHistory = navHistory.isNotEmpty()
             }
             tab = nextTab
             subScreen = nextSub
@@ -192,9 +199,10 @@ fun StaffGateShell(
         if (navHistory.isNotEmpty()) {
             navigateGuarded {
                 if (navHistory.isNotEmpty()) {
-                    val (prevTab, prevSub) = navHistory.removeAt(navHistory.lastIndex)
-                    tab = prevTab
-                    subScreen = prevSub
+                    val prev = navHistory.removeLast()
+                    hasHistory = navHistory.isNotEmpty()
+                    tab = prev.tab
+                    subScreen = prev.subScreen
                 }
             }
         } else if (subScreen != null) {
@@ -204,7 +212,7 @@ fun StaffGateShell(
         }
     }
 
-    BackHandler(enabled = navHistory.isNotEmpty() || subScreen != null) {
+    BackHandler(enabled = hasHistory || subScreen != null) {
         goBack()
     }
 
@@ -233,10 +241,14 @@ fun StaffGateShell(
         )
     }
 
-    LaunchedEffect(state.bannerMessage) {
-        val msg = state.bannerMessage ?: return@LaunchedEffect
-        snackbar.showSnackbar(msg)
-        vm.clearBanner()
+    ReportDrawnWhen { !state.loading }
+
+    val bannerMessage = state.bannerMessage
+    if (bannerMessage != null) {
+        LaunchedEffect(bannerMessage) {
+            snackbar.showSnackbar(bannerMessage)
+            vm.clearBanner()
+        }
     }
 
     LifecycleStartEffect(vm) {
@@ -270,7 +282,7 @@ fun StaffGateShell(
             serverUrl = vm.serverUrl(),
             gatePhone = gatePhone,
             channels = state.cameras!!.channels,
-            okHttpClient = container.okHttpClient,
+            okHttpClient = container.mediaOkHttpClient,
             onDismiss = { showLiveCameraDialog = false },
         )
     }
@@ -594,6 +606,7 @@ fun StaffGateShell(
                     MoreSubScreen.SystemSettings -> SystemSettingsScreen(
                         gatePhone = gatePhone,
                         api = container.api,
+                        cameraTestApi = container.cameraTestApi,
                         isAdmin = isAdmin,
                         meUsername = session?.user.orEmpty(),
                         onMessage = ::showMessage,
@@ -641,7 +654,7 @@ fun StaffGateShell(
                     showAddSheet = showAddResident,
                     serverUrl = vm.serverUrl(),
                     gatePhone = gatePhone,
-                    okHttpClient = container.okHttpClient,
+                    okHttpClient = container.mediaOkHttpClient,
                     onRequestSnapshot = vm::requestSnapshot,
                     onRequestEdit = { editingResident = it },
                     onDismissAdd = { showAddResident = false },
@@ -666,7 +679,7 @@ fun StaffGateShell(
                     state = state,
                     serverUrl = vm.serverUrl(),
                     gatePhone = gatePhone,
-                    okHttpClient = container.okHttpClient,
+                    okHttpClient = container.mediaOkHttpClient,
                     onLoadOlder = vm::loadOlderTransactions,
                     onRequestSnapshot = vm::requestSnapshot,
                     onStopSnapshots = vm::stopSnapshots,

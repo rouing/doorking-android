@@ -17,6 +17,7 @@ class FakeSessionStorage(
     initialTokenServerOrigin: String? = initialToken?.let { serverOriginOf(initialServerUrl) },
     initialBiometricLockEnabled: Boolean = false,
     initialCrashlyticsEnabled: Boolean = false,
+    initialPushOptIn: Boolean = false,
 ) : SessionStorage {
 
     private val _state = MutableStateFlow(
@@ -28,6 +29,7 @@ class FakeSessionStorage(
             loaded = true,
             tokenServerOrigin = initialTokenServerOrigin,
             crashlyticsEnabled = initialCrashlyticsEnabled,
+            pushOptIn = initialPushOptIn,
         ),
     )
     override val state: StateFlow<StoredAuthState> = _state.asStateFlow()
@@ -53,6 +55,7 @@ class FakeSessionStorage(
             lastGatePhone = null,
             biometricLockEnabled = false,
             biometricKeyId = null,
+            pushOptIn = false,
             loaded = true,
         )
     }
@@ -79,5 +82,9 @@ class FakeSessionStorage(
 
     override suspend fun setCrashlyticsEnabled(enabled: Boolean) {
         _state.value = _state.value.copy(crashlyticsEnabled = enabled)
+    }
+
+    override suspend fun setPushOptIn(enabled: Boolean) {
+        _state.value = _state.value.copy(pushOptIn = enabled)
     }
 }

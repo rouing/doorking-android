@@ -2,12 +2,9 @@ package com.doorking.gate.feature.admin
 
 import android.Manifest
 import android.app.StatusBarManager
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -52,7 +49,9 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -89,6 +88,8 @@ import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.ThemeModeSelector
+import com.doorking.gate.feature.auth.isValidExternalBrowserUrl
+import com.doorking.gate.feature.auth.launchPinnedCustomTab
 import com.doorking.gate.feature.auth.validateNewPassword
 import com.doorking.gate.tile.GateRelayTileConfig
 import com.doorking.gate.tile.GateRelayTileManager
@@ -96,9 +97,11 @@ import com.doorking.gate.widget.GateWidgetUpdater
 import com.doorking.gate.widget.RelayWidgetPinHelper
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
@@ -118,6 +121,14 @@ private suspend inline fun <T> safeAccountCall(block: () -> T): T? =
     } catch (_: Exception) {
         null
     }
+
+private fun parseAccountApiError(raw: String?, code: Int, fallback: String): String {
+    if (!raw.isNullOrBlank()) {
+        val parsed = runCatching { ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw) }.getOrNull()
+        if (parsed != null && parsed.error.isNotBlank()) return parsed.error
+    }
+    return "$fallback (HTTP $code)"
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -150,15 +161,9 @@ fun AccountSettingsScreen(
     var addPasskeyPassword by remember { mutableStateOf("") }
     var addingPasskey by remember { mutableStateOf(false) }
 
-    var email by remember { mutableStateOf("") }
-    var emailPassword by remember { mutableStateOf("") }
-    var phone by remember { mutableStateOf("") }
     var notifyAccess by remember { mutableStateOf(true) }
     var notifyAlerts by remember { mutableStateOf(true) }
-    var currentPw by remember { mutableStateOf("") }
-    var newPw by remember { mutableStateOf("") }
-    var confirmPw by remember { mutableStateOf("") }
-    var showPasswords by remember { mutableStateOf(false) }
+    var profileSyncVersion by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -168,22 +173,16 @@ fun AccountSettingsScreen(
         null
     }
     val firebaseReady = remember(context) { FirebaseHelper.isAvailable(context) }
-    val serverUrl = sessionState?.serverUrl?.takeIf { it.isNotBlank() } ?: DEFAULT_SERVER_URL
-    val privacyUri = remember(serverUrl) {
-        val parsed = Uri.parse("${serverUrl.trimEnd('/')}/privacy")
-        if (parsed.scheme.equals("https", ignoreCase = true) && !parsed.host.isNullOrBlank()) {
-            parsed
-        } else {
-            null
-        }
+    val canPinWidget by produceState(initialValue = false, context) {
+        value = withContext(Dispatchers.IO) { RelayWidgetPinHelper.canPin(context) }
     }
-
-    fun parseApiError(raw: String?, code: Int, fallback: String): String {
-        if (!raw.isNullOrBlank()) {
-            val parsed = runCatching { ApiClientFactory.json.decodeFromString<ApiErrorResponse>(raw) }.getOrNull()
-            if (parsed != null && parsed.error.isNotBlank()) return parsed.error
-        }
-        return "$fallback (HTTP $code)"
+    val biometricAvailable by produceState(initialValue = false, context) {
+        value = withContext(Dispatchers.IO) { BiometricUnlockManager.isAvailable(context) }
+    }
+    val serverUrl = sessionState?.serverUrl?.takeIf { it.isNotBlank() } ?: DEFAULT_SERVER_URL
+    val privacyUrl = remember(serverUrl) {
+        val candidate = "${serverUrl.trimEnd('/')}/privacy"
+        candidate.takeIf { isValidExternalBrowserUrl(it) }
     }
 
     suspend fun syncTilesFromProfile(me: MeProfileDto) {
@@ -235,10 +234,9 @@ fun AccountSettingsScreen(
                 }
                 webPushSubs = bundle.webPush
                 aiClients = bundle.aiClients
-                email = bundle.me.pendingEmail.ifBlank { bundle.me.email }
-                phone = bundle.me.phone
                 notifyAccess = bundle.me.notifyAccess
                 notifyAlerts = bundle.me.notifyAlerts
+                profileSyncVersion++
                 loading = false
                 refreshing = false
             }
@@ -255,13 +253,14 @@ fun AccountSettingsScreen(
         error = null
         scope.launch {
             runCatching {
+                sessionStorage?.setPushOptIn(true)
                 FirebaseHelper.enablePushAutoInit(context)
                 val token = FirebaseHelper.fetchFcmToken(context)
                     ?: error("Firebase push token is unavailable on this build/device.")
                 val res = api.registerFcmToken(
                     RegisterFcmRequest(token = token, label = FirebaseHelper.defaultDeviceLabel()),
                 )
-                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not enable push"))
+                if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not enable push"))
                 res.body()
             }
                 .onSuccess { reply ->
@@ -295,7 +294,7 @@ fun AccountSettingsScreen(
             val body = buildJsonObject { put(key, JsonPrimitive(next)) }
             runCatching {
                 val res = api.updateMe(body)
-                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not save preference"))
+                if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not save preference"))
             }
                 .onSuccess { onMessage("Notification preference saved.") }
                 .onFailure { err ->
@@ -346,7 +345,7 @@ fun AccountSettingsScreen(
                                 }
                                 val optRes = api.getPasskeyRegistrationOptions(optBody)
                                 if (!optRes.isSuccessful) {
-                                    error(parseApiError(optRes.errorBody()?.string(), optRes.code(), "Could not start passkey setup"))
+                                    error(parseAccountApiError(optRes.errorBody()?.string(), optRes.code(), "Could not start passkey setup"))
                                 }
                                 val optionsJson = optRes.body()?.toString() ?: error("Empty passkey options")
                                 when (val created = passkeyAuthenticator.register(context, optionsJson)) {
@@ -358,7 +357,7 @@ fun AccountSettingsScreen(
                                             PasskeyRegistrationRequest(name = addPasskeyName.trim(), response = payload),
                                         )
                                         if (!saveRes.isSuccessful) {
-                                            error(parseApiError(saveRes.errorBody()?.string(), saveRes.code(), "Could not save passkey"))
+                                            error(parseAccountApiError(saveRes.errorBody()?.string(), saveRes.code(), "Could not save passkey"))
                                         }
                                         true
                                     }
@@ -412,7 +411,7 @@ fun AccountSettingsScreen(
                         scope.launch {
                             runCatching {
                                 val res = api.deletePasskey(target.id)
-                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove passkey"))
+                                if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not remove passkey"))
                             }
                                 .onSuccess { onMessage("Passkey removed."); load() }
                                 .onFailure { error = it.message ?: "Could not remove passkey" }
@@ -430,9 +429,6 @@ fun AccountSettingsScreen(
     }
 
     val hasLinkedUnits = residentMode || profile?.linkedUnits?.isNotEmpty() == true
-    val emailTrimmed = email.trim().lowercase()
-    val emailChanged = emailTrimmed != profile?.email.orEmpty().lowercase() &&
-        emailTrimmed != profile?.pendingEmail.orEmpty().lowercase()
 
     PullToRefreshBox(
         isRefreshing = refreshing,
@@ -466,7 +462,6 @@ fun AccountSettingsScreen(
             val portalRelayGroups = profile?.portalRelays.orEmpty()
             if (portalRelayGroups.isNotEmpty()) {
                 item(key = "portal_relays", contentType = "portal_relays") {
-                    val canPinWidget = remember(context) { RelayWidgetPinHelper.canPin(context) }
                     val visibleTileSlotByKey = remember(portalRelayGroups) {
                         val map = linkedMapOf<Pair<String, Int>, Int>()
                         var nextSlot = 0
@@ -541,18 +536,20 @@ fun AccountSettingsScreen(
                                     if (canPinWidget) {
                                         IconButton(
                                             onClick = {
-                                                val unitCode = profile?.linkedUnits
-                                                    ?.firstOrNull { it.gatePhone == group.phone }
-                                                    ?.directoryCode
-                                                val ok = RelayWidgetPinHelper.requestPin(
-                                                    context = context,
-                                                    gatePhone = group.phone,
-                                                    gateName = group.siteName.ifBlank { group.phone },
-                                                    relay = opt.relay,
-                                                    relayName = relayLabel,
-                                                    unitCode = unitCode,
-                                                )
-                                                if (!ok) onMessage("Add the 1×1 Relay widget from your home screen widget picker.")
+                                                scope.launch {
+                                                    val unitCode = profile?.linkedUnits
+                                                        ?.firstOrNull { it.gatePhone == group.phone }
+                                                        ?.directoryCode
+                                                    val ok = RelayWidgetPinHelper.requestPin(
+                                                        context = context,
+                                                        gatePhone = group.phone,
+                                                        gateName = group.siteName.ifBlank { group.phone },
+                                                        relay = opt.relay,
+                                                        relayName = relayLabel,
+                                                        unitCode = unitCode,
+                                                    )
+                                                    if (!ok) onMessage("Add the 1×1 Relay widget from your home screen widget picker.")
+                                                }
                                             },
                                         ) {
                                             Icon(
@@ -593,7 +590,7 @@ fun AccountSettingsScreen(
                                                 }
                                                 runCatching {
                                                     val res = api.updateMe(body)
-                                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not save relay visibility"))
+                                                    if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not save relay visibility"))
                                                 }
                                                     .onSuccess {
                                                         onProfileUpdated?.invoke()
@@ -614,145 +611,33 @@ fun AccountSettingsScreen(
             }
 
             item(key = "email", contentType = "email") {
-                SectionCard(
-                    title = "Email",
-                    tonal = true,
-                    trailing = {
-                        when {
-                            !profile?.pendingEmail.isNullOrBlank() -> StatusPill("Pending", tone = PillTone.Warning)
-                            !profile?.email.isNullOrBlank() -> StatusPill("Confirmed", tone = PillTone.Success)
-                            else -> null
-                        }
+                AccountEmailSection(
+                    confirmedEmail = profile?.email.orEmpty(),
+                    pendingEmail = profile?.pendingEmail.orEmpty(),
+                    syncVersion = profileSyncVersion,
+                    api = api,
+                    onError = { error = it },
+                    onMessage = onMessage,
+                    onSaved = {
+                        load()
+                        onProfileUpdated?.invoke()
                     },
-                ) {
-                    Text(
-                        text = "Used for password resets, security alerts, and notifications.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (!profile?.email.isNullOrBlank()) {
-                        Text("Confirmed: ${profile!!.email}", style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (!profile?.pendingEmail.isNullOrBlank()) {
-                        Text(
-                            "Waiting for confirmation: ${profile!!.pendingEmail}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        FilledTonalButton(
-                            onClick = {
-                                scope.launch {
-                                    runCatching {
-                                        val res = api.resendEmailVerification()
-                                        if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not resend link"))
-                                    }
-                                        .onSuccess { onMessage("Confirmation link sent again.") }
-                                        .onFailure { error = it.message ?: "Could not resend link" }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Icon(Icons.Rounded.MarkEmailRead, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                            Text("Send confirmation link again")
-                        }
-                    }
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        label = { Text("Email address") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, autoCorrectEnabled = false),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    if (emailChanged) {
-                        PasswordOutlinedField(
-                            value = emailPassword,
-                            onValueChange = { emailPassword = it },
-                            label = "Current password to confirm email change",
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                    Button(
-                        enabled = emailChanged,
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            error = null
-                            scope.launch {
-                                val body = buildJsonObject {
-                                    put("email", JsonPrimitive(emailTrimmed))
-                                    if (emailPassword.isNotBlank()) put("password", JsonPrimitive(emailPassword))
-                                }
-                                runCatching {
-                                    val res = api.updateMe(body)
-                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Email save failed"))
-                                    res.body()
-                                }
-                                    .onSuccess { updated ->
-                                        emailPassword = ""
-                                        val msg = updated?.warning?.takeIf { it.isNotBlank() }
-                                            ?: if (emailTrimmed.isBlank()) "Email removed." else "Saved. Check $emailTrimmed to confirm."
-                                        onMessage(msg)
-                                        load()
-                                        onProfileUpdated?.invoke()
-                                    }
-                                    .onFailure { error = it.message ?: "Email save failed" }
-                            }
-                        },
-                    ) { Text("Save email") }
-                }
+                )
             }
 
             item(key = "phone", contentType = "phone") {
-                SectionCard(title = if (hasLinkedUnits) "Call-box phone number" else "Phone", tonal = true) {
-                    Text(
-                        text = if (hasLinkedUnits) {
-                            "Linked to your gate directory listing. Updating your 10-digit US/Canada number here updates your unit's call-box number and syncs to the gate on the next send."
-                        } else {
-                            "Optional contact number visible to gate administrators."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        OutlinedTextField(
-                            value = phone,
-                            onValueChange = { phone = it },
-                            label = { Text("Phone number") },
-                            placeholder = { Text("(214) 555-0100") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Button(onClick = {
-                            error = null
-                            scope.launch {
-                                val body = buildJsonObject { put("phone", JsonPrimitive(phone.trim())) }
-                                runCatching {
-                                    val res = api.updateMe(body)
-                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Save failed"))
-                                    res.body()
-                                }
-                                    .onSuccess { updated ->
-                                        val units = updated?.gatePhoneSync?.updatedUnits.orEmpty()
-                                        val msg = if (units.isNotEmpty()) {
-                                            "Saved & updated call-box unit ${units.joinToString(", ") { "#$it" }}."
-                                        } else {
-                                            "Phone saved."
-                                        }
-                                        onMessage(msg)
-                                        load()
-                                        onProfileUpdated?.invoke()
-                                    }
-                                    .onFailure { error = it.message ?: "Save failed" }
-                            }
-                        }) { Text("Save") }
-                    }
-                }
+                AccountPhoneSection(
+                    savedPhone = profile?.phone.orEmpty(),
+                    syncVersion = profileSyncVersion,
+                    hasLinkedUnits = hasLinkedUnits,
+                    api = api,
+                    onError = { error = it },
+                    onMessage = onMessage,
+                    onSaved = {
+                        load()
+                        onProfileUpdated?.invoke()
+                    },
+                )
             }
 
             item(key = "notifications", contentType = "notifications") {
@@ -867,7 +752,7 @@ fun AccountSettingsScreen(
                                     scope.launch {
                                         runCatching {
                                             val res = api.sendTestAllPush()
-                                            if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Test push failed"))
+                                            if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Test push failed"))
                                             res.body()
                                         }
                                             .onSuccess { reply ->
@@ -913,12 +798,23 @@ fun AccountSettingsScreen(
                                         scope.launch {
                                             runCatching {
                                                 val res = api.deleteFcmToken(dev.id)
-                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove device"))
+                                                if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not remove device"))
                                                 res.body()
                                             }
                                                 .onSuccess { reply ->
-                                                    fcmBusy = false
-                                                    if (reply != null) fcmTokens = reply.tokens
+                                                    val remaining = reply?.tokens ?: fcmTokens.filterNot { it.id == dev.id }
+                                                    fcmTokens = remaining
+                                                    val thisDeviceLabel = FirebaseHelper.defaultDeviceLabel()
+                                                    val removedThisDevice = remaining.isEmpty() ||
+                                                        (dev.label.equals(thisDeviceLabel, ignoreCase = true) &&
+                                                            remaining.none { it.label.equals(thisDeviceLabel, ignoreCase = true) })
+                                                    try {
+                                                        if (sessionStorage != null && removedThisDevice) {
+                                                            FirebaseHelper.disablePushOptIn(context, sessionStorage)
+                                                        }
+                                                    } finally {
+                                                        fcmBusy = false
+                                                    }
                                                     onMessage("Removed ${dev.label} from push notifications.")
                                                 }
                                                 .onFailure { err ->
@@ -962,7 +858,7 @@ fun AccountSettingsScreen(
                                         scope.launch {
                                             runCatching {
                                                 val res = api.deleteWebPushSubscription(sub.id)
-                                                if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not remove browser"))
+                                                if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not remove browser"))
                                                 res.body()
                                             }
                                                 .onSuccess { reply ->
@@ -991,7 +887,6 @@ fun AccountSettingsScreen(
 
             if (sessionStorage != null && sessionState != null) {
                 item(key = "biometric_lock", contentType = "biometric_lock") {
-                    val biometricAvailable = remember(context) { BiometricUnlockManager.isAvailable(context) }
                     SectionCard(
                         title = "Fingerprint unlock",
                         tonal = true,
@@ -1125,7 +1020,7 @@ fun AccountSettingsScreen(
                                             scope.launch {
                                                 runCatching {
                                                     val res = api.revokeAiClient(client.id)
-                                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not revoke AI client"))
+                                                    if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not revoke AI client"))
                                                     res.body()
                                                 }
                                                     .onSuccess { reply ->
@@ -1217,49 +1112,11 @@ fun AccountSettingsScreen(
             }
 
             item(key = "password", contentType = "password") {
-                SectionCard(title = "Change Password", tonal = true) {
-                    PasswordOutlinedField(
-                        value = currentPw,
-                        onValueChange = { currentPw = it },
-                        label = "Current password",
-                        visible = showPasswords,
-                        onToggleVisibility = { showPasswords = !showPasswords },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    PasswordOutlinedField(
-                        value = newPw,
-                        onValueChange = { newPw = it },
-                        label = "New password (12+ chars)",
-                        visible = showPasswords,
-                        showVisibilityToggle = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    PasswordOutlinedField(
-                        value = confirmPw,
-                        onValueChange = { confirmPw = it },
-                        label = "Confirm new password",
-                        visible = showPasswords,
-                        showVisibilityToggle = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Button(
-                        enabled = currentPw.isNotBlank() && newPw.isNotBlank() && confirmPw.isNotBlank(),
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            val problem = validateNewPassword(newPw, confirmPw)
-                            if (problem != null) { error = problem; return@Button }
-                            error = null
-                            scope.launch {
-                                runCatching {
-                                    val res = api.changePassword(ChangePasswordRequest(currentPw, newPw))
-                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Password update failed"))
-                                }
-                                    .onSuccess { currentPw = ""; newPw = ""; confirmPw = ""; onMessage("Password updated.") }
-                                    .onFailure { error = it.message ?: "Password update failed" }
-                            }
-                        },
-                    ) { Text("Update password") }
-                }
+                AccountPasswordSection(
+                    api = api,
+                    onError = { error = it },
+                    onMessage = onMessage,
+                )
             }
 
             item(key = "privacy", contentType = "privacy") {
@@ -1271,7 +1128,7 @@ fun AccountSettingsScreen(
                     if (firebaseReady && sessionStorage != null && sessionState != null) {
                         val crashlyticsEnabled = sessionState.crashlyticsEnabled
                         Text(
-                            text = "Optional. Share anonymous crash reports to help diagnose app bugs. No gate codes, credentials, or personal data are included. Off by default.",
+                            text = "Optional. Send Firebase Crashlytics crash traces and device/OS/session diagnostics to help diagnose crashes. Gate codes and passwords are not included. Off by default.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1286,8 +1143,8 @@ fun AccountSettingsScreen(
                                             sessionStorage.setCrashlyticsEnabled(enabled)
                                             FirebaseHelper.setCrashlyticsOptIn(context, enabled)
                                             onMessage(
-                                                if (enabled) "Anonymous crash diagnostics enabled."
-                                                else "Anonymous crash diagnostics disabled.",
+                                                if (enabled) "Crash diagnostics enabled."
+                                                else "Crash diagnostics disabled.",
                                             )
                                         }
                                     },
@@ -1297,7 +1154,7 @@ fun AccountSettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                text = "Share anonymous crash diagnostics",
+                                text = "Share crash diagnostics",
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.weight(1f),
                             )
@@ -1308,13 +1165,11 @@ fun AccountSettingsScreen(
                         }
                     }
                     FilledTonalButton(
-                        enabled = privacyUri != null,
+                        enabled = privacyUrl != null,
                         onClick = {
-                            privacyUri?.let { uri ->
+                            privacyUrl?.let { url ->
                                 runCatching {
-                                    CustomTabsIntent.Builder().build().launchUrl(context, uri)
-                                }.recoverCatching {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                    launchPinnedCustomTab(context, url)
                                 }.onFailure { err ->
                                     error = err.message ?: "Could not open privacy policy"
                                 }
@@ -1361,5 +1216,240 @@ fun AccountSettingsScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AccountEmailSection(
+    confirmedEmail: String,
+    pendingEmail: String,
+    syncVersion: Int,
+    api: DoorkingApi,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onSaved: suspend () -> Unit,
+) {
+    val initialEmail = pendingEmail.ifBlank { confirmedEmail }
+    var email by remember(initialEmail, syncVersion) { mutableStateOf(initialEmail) }
+    var emailPassword by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    val emailTrimmed = email.trim().lowercase()
+    val emailChanged = emailTrimmed != confirmedEmail.lowercase() &&
+        emailTrimmed != pendingEmail.lowercase()
+
+    SectionCard(
+        title = "Email",
+        tonal = true,
+        trailing = {
+            when {
+                pendingEmail.isNotBlank() -> StatusPill("Pending", tone = PillTone.Warning)
+                confirmedEmail.isNotBlank() -> StatusPill("Confirmed", tone = PillTone.Success)
+                else -> Unit
+            }
+        },
+    ) {
+        Text(
+            text = "Used for password resets, security alerts, and notifications.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (confirmedEmail.isNotBlank()) {
+            Text("Confirmed: $confirmedEmail", style = MaterialTheme.typography.bodySmall)
+        }
+        if (pendingEmail.isNotBlank()) {
+            Text(
+                "Waiting for confirmation: $pendingEmail",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FilledTonalButton(
+                onClick = {
+                    scope.launch {
+                        runCatching {
+                            val res = api.resendEmailVerification()
+                            if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Could not resend link"))
+                        }
+                            .onSuccess { onMessage("Confirmation link sent again.") }
+                            .onFailure { onError(it.message ?: "Could not resend link") }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.MarkEmailRead, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("Send confirmation link again")
+            }
+        }
+        OutlinedTextField(
+            value = email,
+            onValueChange = { email = it },
+            label = { Text("Email address") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, autoCorrectEnabled = false),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (emailChanged) {
+            PasswordOutlinedField(
+                value = emailPassword,
+                onValueChange = { emailPassword = it },
+                label = "Current password to confirm email change",
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Button(
+            enabled = emailChanged,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                onError(null)
+                scope.launch {
+                    val body = buildJsonObject {
+                        put("email", JsonPrimitive(emailTrimmed))
+                        if (emailPassword.isNotBlank()) put("password", JsonPrimitive(emailPassword))
+                    }
+                    runCatching {
+                        val res = api.updateMe(body)
+                        if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Email save failed"))
+                        res.body()
+                    }
+                        .onSuccess { updated ->
+                            emailPassword = ""
+                            val msg = updated?.warning?.takeIf { it.isNotBlank() }
+                                ?: if (emailTrimmed.isBlank()) "Email removed." else "Saved. Check $emailTrimmed to confirm."
+                            onMessage(msg)
+                            onSaved()
+                        }
+                        .onFailure { onError(it.message ?: "Email save failed") }
+                }
+            },
+        ) { Text("Save email") }
+    }
+}
+
+@Composable
+private fun AccountPhoneSection(
+    savedPhone: String,
+    syncVersion: Int,
+    hasLinkedUnits: Boolean,
+    api: DoorkingApi,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+    onSaved: suspend () -> Unit,
+) {
+    var phone by remember(savedPhone, syncVersion) { mutableStateOf(savedPhone) }
+    val scope = rememberCoroutineScope()
+
+    SectionCard(title = if (hasLinkedUnits) "Call-box phone number" else "Phone", tonal = true) {
+        Text(
+            text = if (hasLinkedUnits) {
+                "Linked to your gate directory listing. Updating your 10-digit US/Canada number here updates your unit's call-box number and syncs to the gate on the next send."
+            } else {
+                "Optional contact number visible to gate administrators."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = phone,
+                onValueChange = { phone = it },
+                label = { Text("Phone number") },
+                placeholder = { Text("(214) 555-0100") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                modifier = Modifier.weight(1f),
+            )
+            Button(onClick = {
+                onError(null)
+                scope.launch {
+                    val body = buildJsonObject { put("phone", JsonPrimitive(phone.trim())) }
+                    runCatching {
+                        val res = api.updateMe(body)
+                        if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Save failed"))
+                        res.body()
+                    }
+                        .onSuccess { updated ->
+                            val units = updated?.gatePhoneSync?.updatedUnits.orEmpty()
+                            val msg = if (units.isNotEmpty()) {
+                                "Saved & updated call-box unit ${units.joinToString(", ") { "#$it" }}."
+                            } else {
+                                "Phone saved."
+                            }
+                            onMessage(msg)
+                            onSaved()
+                        }
+                        .onFailure { onError(it.message ?: "Save failed") }
+                }
+            }) { Text("Save") }
+        }
+    }
+}
+
+@Composable
+private fun AccountPasswordSection(
+    api: DoorkingApi,
+    onError: (String?) -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    var currentPw by remember { mutableStateOf("") }
+    var newPw by remember { mutableStateOf("") }
+    var confirmPw by remember { mutableStateOf("") }
+    var showPasswords by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    SectionCard(title = "Change Password", tonal = true) {
+        PasswordOutlinedField(
+            value = currentPw,
+            onValueChange = { currentPw = it },
+            label = "Current password",
+            visible = showPasswords,
+            onToggleVisibility = { showPasswords = !showPasswords },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        PasswordOutlinedField(
+            value = newPw,
+            onValueChange = { newPw = it },
+            label = "New password (12+ chars)",
+            visible = showPasswords,
+            showVisibilityToggle = false,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        PasswordOutlinedField(
+            value = confirmPw,
+            onValueChange = { confirmPw = it },
+            label = "Confirm new password",
+            visible = showPasswords,
+            showVisibilityToggle = false,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            enabled = currentPw.isNotBlank() && newPw.isNotBlank() && confirmPw.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                val problem = validateNewPassword(newPw, confirmPw)
+                if (problem != null) {
+                    onError(problem)
+                    return@Button
+                }
+                onError(null)
+                scope.launch {
+                    runCatching {
+                        val res = api.changePassword(ChangePasswordRequest(currentPw, newPw))
+                        if (!res.isSuccessful) error(parseAccountApiError(res.errorBody()?.string(), res.code(), "Password update failed"))
+                    }
+                        .onSuccess {
+                            currentPw = ""
+                            newPw = ""
+                            confirmPw = ""
+                            onMessage("Password updated.")
+                        }
+                        .onFailure { onError(it.message ?: "Password update failed") }
+                }
+            },
+        ) { Text("Update password") }
     }
 }

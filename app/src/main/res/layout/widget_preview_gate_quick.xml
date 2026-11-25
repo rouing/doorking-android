@@ -18,11 +18,13 @@
         android:orientation="horizontal">
 
         <ImageView
-            android:layout_width="28dp"
-            android:layout_height="28dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="@android:color/system_accent1_100"
             android:importantForAccessibility="no"
+            android:padding="6dp"
             android:src="@drawable/ic_widget_gate"
-            android:tint="@android:color/system_accent1_600" />
+            android:tint="@android:color/system_accent1_900" />
 
         <TextView
             android:layout_width="0dp"
@@ -39,9 +41,12 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:background="@android:color/system_accent1_100"
             android:maxLines="1"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp"
             android:text="Ready"
-            android:textColor="@android:color/system_accent1_600"
+            android:textColor="@android:color/system_accent1_900"
             android:textSize="11sp"
             android:textStyle="bold" />
     </LinearLayout>

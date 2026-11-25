@@ -27,6 +27,7 @@ data class GateWidgetSnapshot(
     val relays: List<WidgetRelayEntry> = emptyList(),
     val unitCode: String? = null,
     val busy: Boolean = false,
+    val cooldownSeconds: Int = 0,
 ) {
     companion object {
         const val TONE_NEUTRAL = "neutral"
@@ -74,7 +75,9 @@ object GateWidgetRepository {
 
         val phone = session.gate?.phoneNumber
             ?: stored.lastGatePhone
-            ?: runCatching { api.listGates().gates.firstOrNull()?.phoneNumber }.getOrNull()
+            ?: runCatching { api.listGates().gates.firstOrNull()?.phoneNumber }
+                .onFailure { if (it is CancellationException) throw it }
+                .getOrNull()
 
         if (phone.isNullOrBlank()) {
             return GateWidgetSnapshot(
@@ -87,7 +90,9 @@ object GateWidgetRepository {
         }
 
         val portalMe = if (session.isResidentOnly || session.hasPortalUnit) {
-            runCatching { api.getPortalMe(phone) }.getOrNull()
+            runCatching { api.getPortalMe(phone) }
+                .onFailure { if (it is CancellationException) throw it }
+                .getOrNull()
         } else {
             null
         }
@@ -100,14 +105,17 @@ object GateWidgetRepository {
                 )
             }
             val primaryRelay = relayEntries.first()
-            val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
+            val status = runCatching { api.getPortalStatus(phone) }
+                .onFailure { if (it is CancellationException) throw it }
+                .getOrNull()
+            val cooldownSeconds = (status?.cooldownSeconds ?: 0).coerceAtLeast(0)
             val (statusText, statusTone) = when {
                 status != null && !status.available -> {
                     val pct = status.percent?.let { " $it%" } ?: ""
                     "Busy$pct" to GateWidgetSnapshot.TONE_WARNING
                 }
-                status != null && status.cooldownSeconds > 0 -> {
-                    "Wait ${status.cooldownSeconds}s" to GateWidgetSnapshot.TONE_NEUTRAL
+                cooldownSeconds > 0 -> {
+                    "Wait ${cooldownSeconds}s" to GateWidgetSnapshot.TONE_NEUTRAL
                 }
                 else -> "Ready" to GateWidgetSnapshot.TONE_SUCCESS
             }
@@ -118,11 +126,12 @@ object GateWidgetRepository {
                 subtitle = "Unit ${portalMe.unit.directoryCode} · ${portalMe.unit.name}",
                 statusText = statusText,
                 statusTone = statusTone,
-                canBuzz = status?.available != false && (status?.cooldownSeconds ?: 0) == 0,
+                canBuzz = status?.available != false && cooldownSeconds == 0,
                 buzzRelay = primaryRelay.relay,
                 buzzRelayName = primaryRelay.name,
                 relays = relayEntries,
                 unitCode = portalMe.unit.directoryCode,
+                cooldownSeconds = cooldownSeconds,
             )
         }
 

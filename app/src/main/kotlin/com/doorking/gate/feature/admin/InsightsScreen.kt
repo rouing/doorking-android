@@ -1,14 +1,13 @@
 package com.doorking.gate.feature.admin
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
@@ -35,9 +33,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -54,6 +54,11 @@ import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+
+private val LOOKBACK_DAY_OPTIONS = listOf(30, 90, 180, 365)
+private val INSIGHTS_TAB_LABELS = listOf("Dormant", "Unknown", "Codes")
+private val HOURLY_AXIS_LABELS = listOf("12 AM", "6 AM", "12 PM", "6 PM", "11 PM")
+private val NO_INSIGHTS_SEGMENT_BORDER = BorderStroke(0.dp, Color.Transparent)
 
 private fun <T> List<T>.withUniqueKeys(baseKey: (T) -> String): List<Pair<String, T>> {
     val seen = HashMap<String, Int>(size)
@@ -110,11 +115,16 @@ fun InsightsScreen(
     val entryCodeItems = remember(data?.entryCodes) {
         data?.entryCodes.orEmpty().withUniqueKeys { "c-${it.directoryCode}-${it.entryCode}" }
     }
-    val tabs = listOf(
-        "Dormant (${data?.dormant?.size ?: 0})",
-        "Unknown (${data?.unknownCards?.size ?: 0})",
-        "Codes (${data?.entryCodes?.size ?: 0})",
-    )
+    val dormantCount = data?.dormant?.size ?: 0
+    val unknownCount = data?.unknownCards?.size ?: 0
+    val entryCodeCount = data?.entryCodes?.size ?: 0
+    val tabs = remember(dormantCount, unknownCount, entryCodeCount) {
+        listOf(
+            "${INSIGHTS_TAB_LABELS[0]} ($dormantCount)",
+            "${INSIGHTS_TAB_LABELS[1]} ($unknownCount)",
+            "${INSIGHTS_TAB_LABELS[2]} ($entryCodeCount)",
+        )
+    }
 
     PullToRefreshBox(
         isRefreshing = refreshing,
@@ -132,7 +142,7 @@ fun InsightsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    listOf(30, 90, 180, 365).forEach { opt ->
+                    LOOKBACK_DAY_OPTIONS.forEach { opt ->
                         val selected = days == opt
                         Surface(
                             onClick = { days = opt },
@@ -175,43 +185,65 @@ fun InsightsScreen(
 
                 if (data.traffic.byHour.size == 24) {
                     item(key = "hourly", contentType = "hourly_chart") {
-                        val peakCount = data.traffic.byHour.maxOrNull() ?: 0
-                        val peakHour = data.traffic.byHour.indexOf(peakCount).coerceAtLeast(0)
+                        val byHour = data.traffic.byHour
+                        val peakCount = byHour.maxOrNull() ?: 0
+                        val peakHour = byHour.indexOf(peakCount).coerceAtLeast(0)
+                        val peak = peakCount.coerceAtLeast(1)
+                        val emptyBarColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                        val activeBarColor = MaterialTheme.colorScheme.primary
                         SectionCard(title = "Activity by Hour (0–23)", tonal = true) {
-                            val peak = peakCount.coerceAtLeast(1)
-                            Row(
+                            Spacer(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(88.dp)
-                                    .semantics(mergeDescendants = true) {
+                                    .semantics {
                                         contentDescription = "Hourly gate activity chart. Peak activity is $peakCount events around hour $peakHour."
+                                    }
+                                    .drawWithCache {
+                                        val gapPx = 3.dp.toPx()
+                                        val maxBarHeight = 80.dp.toPx().coerceAtMost(size.height)
+                                        val barWidth = ((size.width - gapPx * (byHour.size - 1)) / byHour.size).coerceAtLeast(1f)
+                                        val radiusPx = minOf(4.dp.toPx(), barWidth / 2f)
+                                        val emptyPath = Path()
+                                        val activePath = Path()
+                                        byHour.forEachIndexed { index, count ->
+                                            val fraction = (count.toFloat() / peak.toFloat()).coerceIn(0.06f, 1f)
+                                            val barHeight = maxBarHeight * fraction
+                                            val left = index * (barWidth + gapPx)
+                                            val bottom = size.height
+                                            val top = bottom - barHeight
+                                            val corner = CornerRadius(radiusPx, minOf(radiusPx, barHeight))
+                                            val target = if (count == 0) emptyPath else activePath
+                                            target.addRoundRect(
+                                                RoundRect(
+                                                    left = left,
+                                                    top = top,
+                                                    right = left + barWidth,
+                                                    bottom = bottom,
+                                                    topLeftCornerRadius = corner,
+                                                    topRightCornerRadius = corner,
+                                                    bottomRightCornerRadius = CornerRadius.Zero,
+                                                    bottomLeftCornerRadius = CornerRadius.Zero,
+                                                ),
+                                            )
+                                        }
+                                        onDrawBehind {
+                                            if (!emptyPath.isEmpty) drawPath(emptyPath, color = emptyBarColor)
+                                            if (!activePath.isEmpty) drawPath(activePath, color = activeBarColor)
+                                        }
                                     },
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                verticalAlignment = Alignment.Bottom,
-                            ) {
-                                data.traffic.byHour.forEach { count ->
-                                    val fraction = (count.toFloat() / peak.toFloat()).coerceIn(0.06f, 1f)
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height((80f * fraction).dp)
-                                            .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                                            .background(
-                                                if (count == 0) MaterialTheme.colorScheme.surfaceContainerHighest
-                                                else MaterialTheme.colorScheme.primary,
-                                            ),
-                                    )
-                                }
-                            }
+                            )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
-                                Text("12 AM", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("6 AM", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("12 PM", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("6 PM", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("11 PM", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                HOURLY_AXIS_LABELS.forEach { axisLabel ->
+                                    Text(
+                                        text = axisLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
@@ -219,7 +251,6 @@ fun InsightsScreen(
 
                 // Borderless Material 3 segmented switcher
                 item(key = "seg", contentType = "segment_tabs") {
-                    val noBorder = BorderStroke(0.dp, Color.Transparent)
                     SingleChoiceSegmentedButtonRow(
                         modifier = Modifier.fillMaxWidth(),
                         space = 2.dp,
@@ -229,7 +260,7 @@ fun InsightsScreen(
                                 selected = tabIndex == idx,
                                 onClick = { tabIndex = idx },
                                 shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabs.size),
-                                border = noBorder,
+                                border = NO_INSIGHTS_SEGMENT_BORDER,
                                 colors = SegmentedButtonDefaults.colors(
                                     inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                                     activeBorderColor = Color.Transparent,

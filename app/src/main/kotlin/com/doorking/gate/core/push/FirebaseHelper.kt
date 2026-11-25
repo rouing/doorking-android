@@ -17,7 +17,10 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Safe Firebase Cloud Messaging & Crashlytics helper.
@@ -111,7 +114,8 @@ object FirebaseHelper {
     }
 
     /**
-     * Registers this device's FCM token with the server when signed in (no-op if signed out or Firebase unavailable).
+     * Registers this device's FCM token with the server when signed in and opted in to push
+     * notifications (no-op if not opted in, signed out, missing permission, or Firebase unavailable).
      */
     suspend fun registerCurrentDevice(
         context: Context,
@@ -120,9 +124,10 @@ object FirebaseHelper {
         requirePermission: Boolean = true,
     ): Boolean {
         if (!isAvailable(context)) return false
+        val stored = sessionStorage.awaitLoaded()
+        if (!stored.pushOptIn) return false
         if (requirePermission && !hasNotificationPermission(context)) return false
-        val token = sessionStorage.awaitLoaded().sessionToken
-        if (token.isNullOrBlank()) return false
+        if (stored.sessionToken.isNullOrBlank()) return false
         enablePushAutoInit(context)
         val fcmToken = fetchFcmToken(context) ?: return false
         return runCatching {
@@ -132,16 +137,59 @@ object FirebaseHelper {
     }
 
     /**
-     * Best-effort unregister on sign-out before the server bearer session is revoked.
+     * Best-effort unregister on sign-out before the server bearer token is revoked.
+     * Avoids calling `fetchFcmToken()` unless the user opted in or FCM auto-init was enabled,
+     * then deletes the local token and disables auto-init.
      */
     suspend fun unregisterCurrentDevice(
         context: Context,
         api: DoorkingApi,
+        sessionStorage: SessionStorage? = null,
     ) {
         if (!isAvailable(context)) return
-        val fcmToken = fetchFcmToken(context) ?: return
-        runCatching {
-            api.unregisterFcmToken(UnregisterFcmRequest(token = fcmToken))
+        val optedIn = sessionStorage?.awaitLoaded()?.pushOptIn == true
+        val autoInitEnabled = runCatching {
+            FirebaseMessaging.getInstance().isAutoInitEnabled
+        }.getOrDefault(false)
+        if (!optedIn && !autoInitEnabled) return
+
+        val fcmToken = fetchFcmToken(context)
+        if (!fcmToken.isNullOrBlank()) {
+            runCatching {
+                api.unregisterFcmToken(UnregisterFcmRequest(token = fcmToken))
+            }
+        }
+        deleteFcmTokenAndDisableAutoInit(context)
+    }
+
+    /**
+     * Opts this device out of push notifications, disables FCM auto-init, and deletes the local
+     * FCM token on [Dispatchers.IO].
+     */
+    suspend fun disablePushOptIn(
+        context: Context,
+        sessionStorage: SessionStorage,
+    ) {
+        sessionStorage.setPushOptIn(false)
+        deleteFcmTokenAndDisableAutoInit(context)
+    }
+
+    private suspend fun deleteFcmTokenAndDisableAutoInit(context: Context) {
+        if (!isAvailable(context)) return
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val messaging = FirebaseMessaging.getInstance()
+                messaging.isAutoInitEnabled = false
+                withTimeoutOrNull(5_000L) {
+                    suspendCancellableCoroutine<Unit> { cont ->
+                        messaging.deleteToken().addOnCompleteListener {
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                    }
+                }
+            }.onFailure { err ->
+                Log.d(TAG, "FCM token delete skipped: ${err.message}")
+            }
         }
     }
 }

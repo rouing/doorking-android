@@ -133,7 +133,7 @@ class AuthInterceptorTest {
             )
         }
 
-        api.checkInvite(InviteCheckRequest(token = "t".repeat(32)))
+        api.checkInviteAtUrl("$baseUrl/api/invite/check", InviteCheckRequest(token = "x".repeat(32)))
         api.requestPasswordReset(PasswordResetRequest(identifier = "alice"))
         api.startSso(SsoStartRequest(provider = "google", native = true))
         api.getPasskeySignInOptions()
@@ -379,5 +379,36 @@ class AuthInterceptorTest {
         assertEquals("/api/sso/google-id-token", tokenReq.path)
         assertNull(tokenReq.getHeader("Authorization"))
         assertEquals("bearer", tokenReq.getHeader("X-Client-Auth"))
+    }
+
+    @Test
+    fun mediaAndCameraTestOkHttpClientsHaveIsolatedDispatcherNoStepUpAnd90sTimeout() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val token = "dks_${"9".repeat(64)}"
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = token)
+        val events = AuthEventBus()
+        var stepUpPrompted = 0
+        val primaryInterceptor = DoorkingAuthInterceptor(storage, events, ApiClientFactory.json) {
+            stepUpPrompted += 1
+            true
+        }
+        val primaryClient = ApiClientFactory.createOkHttp(storage, events, authInterceptor = primaryInterceptor)
+        val mediaClient = ApiClientFactory.createMediaOkHttp(primaryClient, storage, events)
+        val cameraTestClient = ApiClientFactory.createCameraTestOkHttp(primaryClient)
+
+        assertTrue(mediaClient.dispatcher !== primaryClient.dispatcher)
+        assertEquals(90_000, cameraTestClient.readTimeoutMillis)
+
+        // Media client must never invoke interactive stepUpCoordinator on 403 { stepUp: true }.
+        val mediaApi = ApiClientFactory.createApi(mediaClient, baseUrl = "$baseUrl/")
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"stepUp":true,"hasPasskey":true,"error":"Confirm with passkey"}"""),
+        )
+        val res = mediaApi.portalBuzz("2145550100", BuzzRequest(relay = 0))
+        assertEquals(403, res.code())
+        assertEquals(0, stepUpPrompted)
     }
 }

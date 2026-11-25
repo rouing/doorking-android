@@ -39,11 +39,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,8 +62,11 @@ import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.theme.DoorkingTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Configuration activity shown when a user drags the 1×1 `Open Relay (1×1)` widget from the
@@ -88,10 +93,12 @@ class RelayWidgetConfigActivity : FragmentActivity() {
             return
         }
 
-        val appWidgetId = intent?.extras?.getInt(
-            AppWidgetManager.EXTRA_APPWIDGET_ID,
-            AppWidgetManager.INVALID_APPWIDGET_ID,
-        ) ?: AppWidgetManager.INVALID_APPWIDGET_ID
+        val appWidgetId = runCatching {
+            intent?.extras?.getInt(
+                AppWidgetManager.EXTRA_APPWIDGET_ID,
+                AppWidgetManager.INVALID_APPWIDGET_ID,
+            ) ?: AppWidgetManager.INVALID_APPWIDGET_ID
+        }.getOrDefault(AppWidgetManager.INVALID_APPWIDGET_ID)
         if (appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) {
             finish()
             return
@@ -125,8 +132,8 @@ class RelayWidgetConfigActivity : FragmentActivity() {
             }
             val hasSession = !authState.sessionToken.isNullOrBlank()
 
-            LaunchedEffect(authState.loaded, hasSession, authState.biometricLockEnabled) {
-                if (authState.loaded && (!hasSession || !authState.biometricLockEnabled)) {
+            SideEffect {
+                if (authState.loaded && (!hasSession || !authState.biometricLockEnabled) && !biometricUnlocked.value) {
                     biometricUnlocked.value = true
                 }
             }
@@ -158,6 +165,7 @@ class RelayWidgetConfigActivity : FragmentActivity() {
                         loading = false
                     }
                     .onFailure { err ->
+                        if (err is CancellationException) throw err
                         error = ApiClientFactory.parseErrorMessage(err)
                         loading = false
                     }
@@ -228,15 +236,17 @@ class RelayWidgetConfigActivity : FragmentActivity() {
                                                         error = null
                                                         scope.launch {
                                                             runCatching {
-                                                                RelaySingleWidget.configureWidget(
-                                                                    context = applicationContext,
-                                                                    appWidgetId = appWidgetId,
-                                                                    gatePhone = group.phone,
-                                                                    gateName = group.siteName.ifBlank { group.phone },
-                                                                    relay = opt.relay,
-                                                                    relayName = label,
-                                                                    unitCode = linkedUnits[group.phone],
-                                                                )
+                                                                withContext(NonCancellable) {
+                                                                    RelaySingleWidget.configureWidget(
+                                                                        context = applicationContext,
+                                                                        appWidgetId = appWidgetId,
+                                                                        gatePhone = group.phone,
+                                                                        gateName = group.siteName.ifBlank { group.phone },
+                                                                        relay = opt.relay,
+                                                                        relayName = label,
+                                                                        unitCode = linkedUnits[group.phone],
+                                                                    )
+                                                                }
                                                             }.onSuccess {
                                                                 val result = Intent().putExtra(
                                                                     AppWidgetManager.EXTRA_APPWIDGET_ID,
@@ -245,6 +255,7 @@ class RelayWidgetConfigActivity : FragmentActivity() {
                                                                 setResult(Activity.RESULT_OK, result)
                                                                 finish()
                                                             }.onFailure { err ->
+                                                                if (err is CancellationException) throw err
                                                                 error = err.message?.takeIf { it.isNotBlank() }
                                                                     ?: "Could not configure widget."
                                                                 saving = false
@@ -319,12 +330,13 @@ private fun BiometricLockOverlay(
 ) {
     var error by remember { mutableStateOf<String?>(null) }
     var promptTrigger by remember { mutableIntStateOf(0) }
+    val currentOnUnlocked by rememberUpdatedState(onUnlocked)
 
     LaunchedEffect(promptTrigger) {
         error = null
         BiometricUnlockManager.authenticate(
             activity = activity,
-            onSuccess = onUnlocked,
+            onSuccess = { currentOnUnlocked() },
             onError = { msg -> error = msg },
             onCancelled = { /* User can tap Unlock or Cancel */ },
         )
