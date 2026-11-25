@@ -5,4 +5,5 @@
     <string name="widget_relay_label">Open Relay (1×1)</string>
     <string name="widget_relay_description">1×1 Buzz Me In shortcut for any gate relay you can open.</string>
     <string name="qs_tile_gate_label">Open Gate</string>
+    <string name="app_functions_display_description">Check gate status and open authorized DoorKing gate entrances.</string>
 </resources>

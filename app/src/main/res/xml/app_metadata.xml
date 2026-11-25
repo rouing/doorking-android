@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppFunctionAppMetadata xmlns:appfn="http://schemas.android.com/apk/androidx.appfunctions"
+    appfn:instructions="Manages DoorKing community gates: listing accessible gate relays, checking gate availability, and momentarily opening authorized gate entrances.
+
+Operational Patterns:
+- Call 'listOpenableGateRelays' to resolve available gate names and relay names when the user omits a gate or relay name, or when a requested name is ambiguous.
+- Call 'openGateRelay' with the requested relay name and optional gate name to momentarily open that entrance.
+- Call 'getGateStatus' to check whether a gate is ready, busy syncing, or cooling down.
+
+Constraints:
+- Only relays authorized for the signed-in account can be opened.
+- A 30-second cooldown applies between consecutive gate openings per gate.
+- Gates configured to require passkey confirmation cannot be opened without interactive confirmation in the app."
+    appfn:displayDescription="@string/app_functions_display_description" />

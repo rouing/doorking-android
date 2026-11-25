@@ -6,6 +6,7 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
   alias(libs.plugins.kotlin.serialization)
+  alias(libs.plugins.ksp)
   alias(libs.plugins.play.publisher)
 }
 
@@ -188,6 +189,10 @@ dependencies {
   // Android Auto (IoT category — resident Buzz Me In on car display)
   implementation(libs.androidx.car.app)
   implementation(libs.androidx.car.app.projected)
+
+  // Android AppFunctions (Gemini & on-device agent voice commands on Android 16+)
+  implementation(libs.androidx.appfunctions)
+  ksp(libs.androidx.appfunctions.compiler)
 
   // Firebase Cloud Messaging (Push Notifications) & Crashlytics (no Analytics)
   implementation(platform(libs.firebase.bom))
