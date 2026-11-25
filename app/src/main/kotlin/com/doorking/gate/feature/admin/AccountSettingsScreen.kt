@@ -1,6 +1,7 @@
 package com.doorking.gate.feature.admin
 
 import android.Manifest
+import android.app.StatusBarManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DashboardCustomize
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.MarkEmailRead
@@ -79,6 +81,8 @@ import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.ThemeModeSelector
 import com.doorking.gate.feature.auth.validateNewPassword
+import com.doorking.gate.tile.GateRelayTileConfig
+import com.doorking.gate.tile.GateRelayTileManager
 import com.doorking.gate.widget.GateWidgetUpdater
 import com.doorking.gate.widget.RelayWidgetPinHelper
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -136,6 +140,26 @@ fun AccountSettingsScreen(
         return "$fallback (HTTP $code)"
     }
 
+    fun syncTilesFromProfile(me: MeProfileDto) {
+        val visibleTiles = buildList {
+            me.portalRelays.forEach { group ->
+                val unitCode = me.linkedUnits.firstOrNull { it.gatePhone == group.phone }?.directoryCode
+                group.relays.filter { !it.hidden }.forEach { opt ->
+                    add(
+                        GateRelayTileConfig(
+                            gatePhone = group.phone,
+                            gateName = group.siteName.ifBlank { group.phone },
+                            relay = opt.relay,
+                            relayName = opt.name.ifBlank { "Relay ${opt.relay}" },
+                            unitCode = unitCode,
+                        ),
+                    )
+                }
+            }
+        }
+        GateRelayTileManager.syncVisibleRelays(context, visibleTiles)
+    }
+
     fun load(initial: Boolean = false) {
         if (initial) loading = true else refreshing = true
         notificationPermGranted = FirebaseHelper.hasNotificationPermission(context)
@@ -155,6 +179,7 @@ fun AccountSettingsScreen(
                     @Suppress("UNCHECKED_CAST")
                     val webPush = results[3] as List<WebPushSubDto>
                     profile = me
+                    syncTilesFromProfile(me)
                     passkeys = pks
                     if (fcm != null) {
                         fcmServerEnabled = fcm.enabled
@@ -388,9 +413,21 @@ fun AccountSettingsScreen(
             if (portalRelayGroups.isNotEmpty()) {
                 item(key = "portal_relays") {
                     val canPinWidget = remember(context) { RelayWidgetPinHelper.canPin(context) }
+                    val visibleTileSlotByKey = remember(portalRelayGroups) {
+                        val map = linkedMapOf<Pair<String, Int>, Int>()
+                        var nextSlot = 0
+                        portalRelayGroups.forEach { g ->
+                            g.relays.filter { !it.hidden }.forEach { r ->
+                                if (nextSlot < GateRelayTileManager.MAX_SLOTS) {
+                                    map[g.phone to r.relay] = nextSlot++
+                                }
+                            }
+                        }
+                        map
+                    }
                     SectionCard(title = "Visible gate relays", tonal = true) {
                         Text(
-                            text = "Choose which gate open buttons appear in the app and Android Auto. Pin any relay as a 1×1 home-screen shortcut.",
+                            text = "Choose which gate open buttons appear in the app and Android Auto. Pin any relay as a 1×1 home-screen shortcut or add it to Quick Settings.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -404,18 +441,47 @@ fun AccountSettingsScreen(
                             }
                             group.relays.forEach { opt ->
                                 val visible = !opt.hidden
+                                val relayLabel = opt.name.ifBlank { "Relay ${opt.relay}" }
+                                val tileSlot = if (visible) visibleTileSlotByKey[group.phone to opt.relay] else null
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(vertical = 2.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        text = opt.name.ifBlank { "Relay ${opt.relay}" },
+                                        text = relayLabel,
                                         style = MaterialTheme.typography.bodyMedium,
                                         modifier = Modifier.weight(1f),
                                     )
+                                    if (tileSlot != null) {
+                                        IconButton(
+                                            onClick = {
+                                                profile?.let(::syncTilesFromProfile)
+                                                val started = GateRelayTileManager.requestAddTile(
+                                                    context = context,
+                                                    slotIndex = tileSlot,
+                                                ) { resultCode ->
+                                                    when (resultCode) {
+                                                        StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ->
+                                                            onMessage("Added $relayLabel to Quick Settings.")
+                                                        StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ->
+                                                            onMessage("$relayLabel is already in Quick Settings.")
+                                                    }
+                                                }
+                                                if (!started) {
+                                                    onMessage("Add the $relayLabel tile from Android Quick Settings edit mode.")
+                                                }
+                                            },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.DashboardCustomize,
+                                                contentDescription = "Add $relayLabel to Quick Settings",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
+                                    }
                                     if (canPinWidget) {
                                         IconButton(
                                             onClick = {
@@ -427,7 +493,7 @@ fun AccountSettingsScreen(
                                                     gatePhone = group.phone,
                                                     gateName = group.siteName.ifBlank { group.phone },
                                                     relay = opt.relay,
-                                                    relayName = opt.name.ifBlank { "Relay ${opt.relay}" },
+                                                    relayName = relayLabel,
                                                     unitCode = unitCode,
                                                 )
                                                 if (!ok) onMessage("Add the 1×1 Relay widget from your home screen widget picker.")
@@ -435,7 +501,7 @@ fun AccountSettingsScreen(
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.PushPin,
-                                                contentDescription = "Pin ${opt.name.ifBlank { "Relay ${opt.relay}" }} 1×1 widget",
+                                                contentDescription = "Pin $relayLabel 1×1 widget",
                                                 tint = MaterialTheme.colorScheme.primary,
                                             )
                                         }
@@ -452,7 +518,9 @@ fun AccountSettingsScreen(
                                                 if (g.phone != group.phone) g
                                                 else g.copy(relays = g.relays.map { r -> if (r.relay == opt.relay) r.copy(hidden = !wantVisible) else r })
                                             }
-                                            profile = profile?.copy(hiddenRelays = currentHidden, portalRelays = nextGroups)
+                                            val updatedProfile = profile?.copy(hiddenRelays = currentHidden, portalRelays = nextGroups)
+                                            profile = updatedProfile
+                                            updatedProfile?.let(::syncTilesFromProfile)
                                             scope.launch {
                                                 val body = buildJsonObject {
                                                     put(

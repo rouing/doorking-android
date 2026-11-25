@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.ApiKeyInfoDto
+import com.doorking.gate.core.network.CameraChannelDto
+import com.doorking.gate.core.network.CameraSettingsDto
 import com.doorking.gate.core.network.CreateApiKeyRequest
 import com.doorking.gate.core.network.CreateWebhookRequest
 import com.doorking.gate.core.network.DeviceRangeDto
@@ -98,6 +100,8 @@ fun SystemSettingsScreen(
     var reports by remember { mutableStateOf<List<SuspiciousReportDto>>(emptyList()) }
     var requests by remember { mutableStateOf<List<ResidentRequestDto>>(emptyList()) }
     var prefs by remember { mutableStateOf(GatePrefsDto()) }
+    var cameras by remember { mutableStateOf<CameraSettingsDto?>(null) }
+    val cameraChannels = remember { mutableStateListOf<CameraChannelDto>() }
     var createdKey by remember { mutableStateOf<Pair<String, String>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -113,6 +117,7 @@ fun SystemSettingsScreen(
     var openAudit by remember { mutableStateOf(false) }
     var openKeys by remember { mutableStateOf(false) }
     var openWebhooks by remember { mutableStateOf(false) }
+    var openCameras by remember { mutableStateOf(false) }
     var openDevices by remember { mutableStateOf(false) }
     var openDanger by remember { mutableStateOf(false) }
     var confirmDeleteGate by remember { mutableStateOf(false) }
@@ -159,6 +164,10 @@ fun SystemSettingsScreen(
                     audit = runCatching { api.getLoginAudit(gatePhone).entries }.getOrDefault(emptyList())
                     reports = runCatching { api.getSuspiciousReports(gatePhone).reports }.getOrDefault(emptyList())
                     requests = runCatching { api.getAdminResidentRequests(gatePhone).requests }.getOrDefault(emptyList())
+                    val cams = runCatching { api.getCameras(gatePhone).settings }.getOrNull()
+                    cameras = cams
+                    cameraChannels.clear()
+                    if (cams != null) cameraChannels.addAll(cams.channels)
                 }
             }
                 .onSuccess { loading = false; refreshing = false }
@@ -748,6 +757,98 @@ fun SystemSettingsScreen(
                             }
                         },
                     ) { Text("Add webhook") }
+                }
+            }
+            // 6b. Camera Channels ↔ Relay Mapping
+            val camCfg = cameras
+            if (camCfg != null && cameraChannels.isNotEmpty()) {
+                item(key = "camera_channels") {
+                    val gateRelays = openableRelayIndices(prefs.tracker)
+                    CollapsibleSection(
+                        title = "Camera Channels (${cameraChannels.size})",
+                        expanded = openCameras,
+                        onToggle = { openCameras = !openCameras },
+                        helpText = "Map each camera channel to specific gate relays so snapshots and clips only capture cameras watching the relay that fired. Leave none selected to record on all relays.",
+                    ) {
+                        cameraChannels.forEachIndexed { idx, ch ->
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    StatusPill("Ch ${ch.channel}", tone = PillTone.Primary)
+                                    Text(
+                                        text = ch.name.ifBlank { "Channel ${ch.channel}" },
+                                        style = MaterialTheme.typography.titleSmall,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    FilterChip(
+                                        selected = ch.relays.isEmpty(),
+                                        onClick = { cameraChannels[idx] = ch.copy(relays = emptyList()) },
+                                        label = { Text("All relays") },
+                                    )
+                                    gateRelays.forEach { relay ->
+                                        val selected = relay in ch.relays
+                                        FilterChip(
+                                            selected = selected,
+                                            onClick = {
+                                                val next = if (selected) {
+                                                    ch.relays.filterNot { it == relay }
+                                                } else {
+                                                    (ch.relays + relay).distinct().sorted()
+                                                }
+                                                cameraChannels[idx] = ch.copy(relays = next)
+                                            },
+                                            label = { Text(relayDisplayName(prefs.relayLabels, relay)) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                error = null
+                                scope.launch {
+                                    val channelsJson = JsonArray(
+                                        cameraChannels.map { ch ->
+                                            buildJsonObject {
+                                                put("channel", JsonPrimitive(ch.channel))
+                                                put("name", JsonPrimitive(ch.name))
+                                                put("relays", JsonArray(ch.relays.distinct().sorted().map { JsonPrimitive(it) }))
+                                            }
+                                        },
+                                    )
+                                    val body = buildJsonObject {
+                                        put("enabled", JsonPrimitive(camCfg.enabled))
+                                        put("serial", JsonPrimitive(camCfg.serial))
+                                        put("username", JsonPrimitive(camCfg.username))
+                                        put("mode", JsonPrimitive(camCfg.mode))
+                                        put("clockOffset", JsonPrimitive(camCfg.clockOffset))
+                                        put("frames", JsonPrimitive(camCfg.frames))
+                                        put("framesAfter", JsonPrimitive(camCfg.framesAfter))
+                                        put("clipTries", JsonPrimitive(camCfg.clipTries))
+                                        put("events", JsonPrimitive(camCfg.events))
+                                        put("backfillHours", JsonPrimitive(camCfg.backfillHours))
+                                        put("keepDays", JsonPrimitive(camCfg.keepDays))
+                                        put("channels", channelsJson)
+                                    }
+                                    runCatching {
+                                        val res = api.saveCameras(gatePhone, body)
+                                        if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
+                                    }
+                                        .onSuccess { onMessage("Camera relay mapping saved."); load(); onReloadGate() }
+                                        .onFailure { error = it.message ?: "Save failed" }
+                                }
+                            },
+                        ) { Text("Save camera relays") }
+                    }
                 }
             }
         }

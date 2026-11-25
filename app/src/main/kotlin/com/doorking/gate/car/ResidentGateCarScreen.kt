@@ -159,6 +159,7 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = scope.launch {
+            var idleTicks = 0
             while (isActive) {
                 val cur = uiState
                 val fast = cur is CarGateUiState.Ready && (
@@ -169,8 +170,41 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
                 val latest = uiState
                 // Skip overwriting an in-flight buzz spinner while the HTTP call is active.
                 if (latest is CarGateUiState.Ready && latest.buzzingKey != null) continue
-                fetchAndApply(silent = true)
+                if (latest is CarGateUiState.Ready) {
+                    if (fast) {
+                        idleTicks = 0
+                        refreshStatusesAndApply(latest)
+                    } else {
+                        idleTicks++
+                        if (idleTicks >= FULL_REFRESH_EVERY_IDLE_TICKS) {
+                            idleTicks = 0
+                            fetchAndApply(silent = true)
+                        } else {
+                            refreshStatusesAndApply(latest)
+                        }
+                    }
+                } else {
+                    idleTicks = 0
+                    fetchAndApply(silent = true)
+                }
             }
+        }
+    }
+
+    private suspend fun refreshStatusesAndApply(current: CarGateUiState.Ready) {
+        val app = carContext.applicationContext as? DoorkingApp ?: return
+        if (app.startupCrash != null) return
+        val next = withContext(Dispatchers.IO) {
+            CarGateRepository.refreshStatusesOnly(
+                api = app.container.api,
+                current = current,
+            )
+        }
+        val latest = uiState
+        if (latest is CarGateUiState.Ready && latest.buzzingKey != null) return
+        if (next != uiState) {
+            uiState = next
+            invalidate()
         }
     }
 
@@ -240,9 +274,9 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             }
             CarToast.makeText(carContext, toast, CarToast.LENGTH_LONG).show()
             val refreshed = withContext(Dispatchers.IO) {
-                CarGateRepository.fetchState(
-                    sessionStorage = app.container.sessionStorage,
+                CarGateRepository.refreshStatusesOnly(
                     api = app.container.api,
+                    current = current.copy(buzzingKey = null),
                 )
             }
             uiState = refreshed
@@ -255,5 +289,6 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
     private companion object {
         const val FAST_POLL_MS = 2_000L
         const val IDLE_POLL_MS = 10_000L
+        const val FULL_REFRESH_EVERY_IDLE_TICKS = 6
     }
 }

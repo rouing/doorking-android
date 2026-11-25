@@ -2,6 +2,7 @@ package com.doorking.gate.core.auth
 
 import android.content.Context
 import com.doorking.gate.BuildConfig
+import com.doorking.gate.tile.GateRelayTileManager
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -64,7 +65,8 @@ class EncryptedSessionStore(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : SessionStorage {
 
-    private val dataStore = context.applicationContext.authDataStore
+    private val appContext = context.applicationContext
+    private val dataStore = appContext.authDataStore
     private val _state = MutableStateFlow(StoredAuthState())
     override val state: StateFlow<StoredAuthState> = _state.asStateFlow()
 
@@ -110,6 +112,7 @@ class EncryptedSessionStore(
             it.remove(KEY_BIOMETRIC_KEY_ID)
         }
         BiometricKeyManager.deleteLocalKey()
+        GateRelayTileManager.clearAll(appContext)
         _state.value = _state.value.copy(
             sessionToken = null,
             lastGatePhone = null,

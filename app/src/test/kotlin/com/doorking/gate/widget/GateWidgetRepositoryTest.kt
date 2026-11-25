@@ -123,4 +123,59 @@ class GateWidgetRepositoryTest {
         assertTrue(failed is WidgetBuzzOutcome.Failed)
         assertTrue((failed as WidgetBuzzOutcome.Failed).message.contains("18 seconds"))
     }
+
+    @Test
+    fun populatesAllVisibleRelaysInSnapshotWhileKeepingPrimaryRelay() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/session" -> json(
+                    200,
+                    """{"loggedIn":true,"user":"res_101","isResidentOnly":true,"gate":{"phoneNumber":"2145550100","siteName":"Oakridge","role":"resident"}}""",
+                )
+                request.path!!.startsWith("/api/portal/gates/2145550100/me") -> json(
+                    200,
+                    """
+                    {
+                      "gate":{"phoneNumber":"2145550100","siteName":"Oakridge"},
+                      "unit":{"directoryCode":"101","name":"Jordan"},
+                      "portal":{
+                        "enabled":true,
+                        "buzzEnabled":true,
+                        "buzzRelays":[0,1,2],
+                        "buzzRelayLabels":[
+                          {"relay":0,"name":"Main Gate"},
+                          {"relay":1,"name":"Exit Gate"},
+                          {"relay":2,"name":"Walk Gate"}
+                        ]
+                      },
+                      "reroll":{"remainingToday":1}
+                    }
+                    """.trimIndent(),
+                )
+                request.path == "/api/portal/gates/2145550100/status" -> json(
+                    200,
+                    """{"available":true,"cooldownSeconds":0}""",
+                )
+                else -> json(404, """{"error":"not found"}""")
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"7".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        val snap = GateWidgetRepository.fetchSnapshot(storage, api)
+        assertTrue(snap.signedIn)
+        assertTrue(snap.canBuzz)
+        assertEquals(0, snap.buzzRelay)
+        assertEquals("Main Gate", snap.buzzRelayName)
+        assertEquals(
+            listOf(
+                WidgetRelayEntry(0, "Main Gate"),
+                WidgetRelayEntry(1, "Exit Gate"),
+                WidgetRelayEntry(2, "Walk Gate"),
+            ),
+            snap.relays,
+        )
+    }
 }

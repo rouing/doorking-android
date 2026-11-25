@@ -526,6 +526,7 @@ data class GatePrefsDto(
 data class CameraChannelDto(
     val channel: Int,
     val name: String = "",
+    val relays: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -536,6 +537,9 @@ data class CameraSettingsDto(
     val mode: String = "snapshots",
     val clockOffset: Int = 0,
     val frames: Int = 3,
+    val framesAfter: Int = 0,
+    val clipTries: Int = 2,
+    val events: String = "access",
     val backfillHours: Int = 24,
     val keepDays: Int = 0,
     val channels: List<CameraChannelDto> = emptyList(),
@@ -1075,4 +1079,28 @@ data class TestPushReply(
     val sent: Int = 0,
     val failed: Int = 0,
     val removed: Int = 0,
+)
+
+@Serializable
+data class PendingPasskeyApprovalDto(
+    val id: String,
+    val deviceLabel: String = "",
+    val ip: String = "",
+    val createdAt: String = "",
+    val expiresAt: String = "",
+    val choices: List<Int> = emptyList(),
+    val challenge: String = "",
+)
+
+@Serializable
+data class PendingPasskeyApprovalsReply(
+    val requests: List<PendingPasskeyApprovalDto> = emptyList(),
+)
+
+@Serializable
+data class RespondPasskeyApprovalRequest(
+    val decision: String,
+    val pickedNumber: Int? = null,
+    val biometricKeyId: String? = null,
+    val signature: String? = null,
 )

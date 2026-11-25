@@ -42,6 +42,44 @@ class DoorkingFirebaseMessagingService : FirebaseMessagingService() {
     @SuppressLint("MissingPermission")
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
+
+        if (message.data["type"] == "passkey_approval") {
+            val requestId = message.data["requestId"].orEmpty()
+            if (requestId.isBlank()) return
+            val deviceLabel = message.data["deviceLabel"].orEmpty().ifBlank { "Another device" }
+            val app = application as? DoorkingApp
+            if (app != null && app.startupCrash == null) {
+                app.container.passkeyApprovalRequests.tryEmit(requestId)
+            }
+            if (!FirebaseHelper.hasNotificationPermission(this)) return
+            FirebaseHelper.ensureNotificationChannel(this)
+
+            val tag = "passkey-approval-$requestId"
+            val launchIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_PASSKEY_APPROVAL_REQUEST_ID, requestId)
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                tag.hashCode(),
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val title = "Approve new passkey?"
+            val body = "$deviceLabel wants to add a passkey. Tap to verify."
+            val notification = NotificationCompat.Builder(this, FirebaseHelper.CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_widget_gate)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+            NotificationManagerCompat.from(this).notify(tag, tag.hashCode(), notification)
+            return
+        }
+
         if (!FirebaseHelper.hasNotificationPermission(this)) return
         FirebaseHelper.ensureNotificationChannel(this)
 
@@ -74,5 +112,9 @@ class DoorkingFirebaseMessagingService : FirebaseMessagingService() {
             .build()
 
         NotificationManagerCompat.from(this).notify(tag, tag.hashCode(), notification)
+    }
+
+    companion object {
+        const val EXTRA_PASSKEY_APPROVAL_REQUEST_ID = "passkey_approval_request_id"
     }
 }

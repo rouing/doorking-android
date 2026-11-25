@@ -54,6 +54,17 @@ interface DoorkingApi {
     @DELETE("api/me/passkeys/{id}")
     suspend fun deletePasskey(@Path("id") id: String): Response<OkResponse>
 
+    // --- Push-Notification Passkey Approval ---
+
+    @GET("api/me/passkey-approval-requests/pending")
+    suspend fun getPendingPasskeyApprovals(): PendingPasskeyApprovalsReply
+
+    @POST("api/me/passkey-approval-requests/{id}/respond")
+    suspend fun respondPasskeyApproval(
+        @Path("id") id: String,
+        @Body body: RespondPasskeyApprovalRequest,
+    ): Response<JsonObject>
+
     // --- Android FCM Push Notifications ---
 
     @GET("api/me/fcm")

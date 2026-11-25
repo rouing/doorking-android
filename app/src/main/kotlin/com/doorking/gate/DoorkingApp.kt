@@ -28,6 +28,7 @@ class AppContainer(context: Context) {
     val authEvents = AuthEventBus()
     val ssoCallbacks = MutableSharedFlow<Uri>(extraBufferCapacity = 2)
     val inviteLinks = MutableSharedFlow<Uri>(replay = 1, extraBufferCapacity = 2)
+    val passkeyApprovalRequests = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 4)
     val passkeyAuthenticator: PasskeyAuthenticator = AndroidPasskeyManager()
     val stepUpCoordinator = UiStepUpCoordinator()
     val authInterceptor = DoorkingAuthInterceptor(

@@ -5,6 +5,13 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.BuzzRequest
 import com.doorking.gate.core.network.DoorkingApi
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class WidgetRelayEntry(
+    val relay: Int,
+    val name: String,
+)
 
 data class GateWidgetSnapshot(
     val signedIn: Boolean = false,
@@ -16,6 +23,7 @@ data class GateWidgetSnapshot(
     val canBuzz: Boolean = false,
     val buzzRelay: Int = 0,
     val buzzRelayName: String = "Gate",
+    val relays: List<WidgetRelayEntry> = emptyList(),
     val unitCode: String? = null,
     val busy: Boolean = false,
 ) {
@@ -83,7 +91,13 @@ object GateWidgetRepository {
         }
 
         if (portalMe != null && portalMe.portal.buzzEnabled && portalMe.portal.buzzRelayLabels.isNotEmpty()) {
-            val primaryRelay = portalMe.portal.buzzRelayLabels.first()
+            val relayEntries = portalMe.portal.buzzRelayLabels.map {
+                WidgetRelayEntry(
+                    relay = it.relay,
+                    name = it.name.ifBlank { "Relay ${it.relay}" },
+                )
+            }
+            val primaryRelay = relayEntries.first()
             val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
             val (statusText, statusTone) = when {
                 status != null && !status.available -> {
@@ -105,6 +119,7 @@ object GateWidgetRepository {
                 canBuzz = status?.available != false && (status?.cooldownSeconds ?: 0) == 0,
                 buzzRelay = primaryRelay.relay,
                 buzzRelayName = primaryRelay.name,
+                relays = relayEntries,
                 unitCode = portalMe.unit.directoryCode,
             )
         }

@@ -164,4 +164,103 @@ class CarGateRepositoryTest {
         assertEquals("Wait 18s", state.relays.single().statusText)
         assertFalse(state.relays.single().canBuzz)
     }
+
+    @Test
+    fun refreshStatusesOnlyCallsPortalStatusOncePerDistinctGateAndUpdatesTiles() = runTest {
+        server.enqueue(json("""{"available":true,"cooldownSeconds":24}"""))
+        server.enqueue(json("""{"available":false,"busyReason":"pulling","percent":60,"cooldownSeconds":0}"""))
+
+        val (_, api) = createClient()
+        val initial = CarGateUiState.Ready(
+            title = "Doorking Gate",
+            multipleGates = true,
+            relays = listOf(
+                CarRelayTile(
+                    key = "2145550100:0",
+                    gatePhone = "2145550100",
+                    gateName = "Oakridge Condos",
+                    unitCode = "101",
+                    relay = 0,
+                    relayName = "Main Gate",
+                    statusText = "Tap to open",
+                    canBuzz = true,
+                    requirePasskey = false,
+                ),
+                CarRelayTile(
+                    key = "2145550100:2",
+                    gatePhone = "2145550100",
+                    gateName = "Oakridge Condos",
+                    unitCode = "101",
+                    relay = 2,
+                    relayName = "Walk Gate",
+                    statusText = "Tap to open",
+                    canBuzz = true,
+                    requirePasskey = false,
+                ),
+                CarRelayTile(
+                    key = "2145550200:0",
+                    gatePhone = "2145550200",
+                    gateName = "West Annex",
+                    unitCode = "202",
+                    relay = 0,
+                    relayName = "North Entry",
+                    statusText = "Tap to open",
+                    canBuzz = true,
+                    requirePasskey = false,
+                ),
+            ),
+        )
+
+        val refreshed = CarGateRepository.refreshStatusesOnly(api, initial)
+
+        // Only 2 HTTP calls total (one /status per distinct gatePhone — no session/gates/portal/me calls).
+        assertEquals(2, server.requestCount)
+        assertEquals("/api/portal/gates/2145550100/status", server.takeRequest().path)
+        assertEquals("/api/portal/gates/2145550200/status", server.takeRequest().path)
+
+        // Both relays on gate 2145550100 updated to cooldown state.
+        assertEquals("Wait 24s", refreshed.relays[0].statusText)
+        assertFalse(refreshed.relays[0].canBuzz)
+        assertFalse(refreshed.relays[0].isBusy)
+        assertEquals(24, refreshed.relays[0].cooldownSeconds)
+
+        assertEquals("Wait 24s", refreshed.relays[1].statusText)
+        assertFalse(refreshed.relays[1].canBuzz)
+        assertEquals(24, refreshed.relays[1].cooldownSeconds)
+
+        // Relay on gate 2145550200 updated to busy 60%.
+        assertEquals("Busy 60%", refreshed.relays[2].statusText)
+        assertFalse(refreshed.relays[2].canBuzz)
+        assertTrue(refreshed.relays[2].isBusy)
+        assertEquals(0, refreshed.relays[2].cooldownSeconds)
+    }
+
+    @Test
+    fun refreshStatusesOnlyPreservesPasskeyRequirement() = runTest {
+        server.enqueue(json("""{"available":true,"cooldownSeconds":0}"""))
+
+        val (_, api) = createClient()
+        val initial = CarGateUiState.Ready(
+            title = "Oakridge Condos",
+            multipleGates = false,
+            relays = listOf(
+                CarRelayTile(
+                    key = "2145550100:0",
+                    gatePhone = "2145550100",
+                    gateName = "Oakridge Condos",
+                    unitCode = "101",
+                    relay = 0,
+                    relayName = "Main Gate",
+                    statusText = "Passkey on phone",
+                    canBuzz = false,
+                    requirePasskey = true,
+                ),
+            ),
+        )
+
+        val refreshed = CarGateRepository.refreshStatusesOnly(api, initial)
+        assertEquals(1, server.requestCount)
+        assertEquals("Passkey on phone", refreshed.relays.single().statusText)
+        assertFalse(refreshed.relays.single().canBuzz)
+    }
 }

@@ -46,6 +46,7 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import com.doorking.gate.MainActivity
 import com.doorking.gate.R
+import com.doorking.gate.core.network.ApiClientFactory
 
 /**
  * Material 3 Jetpack Glance home-screen widget for 1-tap "Buzz Me In" and live gate status.
@@ -76,22 +77,29 @@ class GateQuickWidget : GlanceAppWidget() {
         val KEY_CAN_BUZZ = booleanPreferencesKey("can_buzz")
         val KEY_BUZZ_RELAY = intPreferencesKey("buzz_relay")
         val KEY_BUZZ_RELAY_NAME = stringPreferencesKey("buzz_relay_name")
+        val KEY_RELAYS_JSON = stringPreferencesKey("relays_json")
         val KEY_UNIT_CODE = stringPreferencesKey("unit_code")
         val KEY_BUSY = booleanPreferencesKey("busy")
 
-        fun snapshotFromPrefs(prefs: Preferences): GateWidgetSnapshot = GateWidgetSnapshot(
-            signedIn = prefs[KEY_SIGNED_IN] ?: false,
-            gatePhone = prefs[KEY_GATE_PHONE].orEmpty(),
-            gateName = prefs[KEY_GATE_NAME] ?: "Doorking Gate",
-            subtitle = prefs[KEY_SUBTITLE] ?: "Tap to open app",
-            statusText = prefs[KEY_STATUS_TEXT] ?: "Tap refresh",
-            statusTone = prefs[KEY_STATUS_TONE] ?: GateWidgetSnapshot.TONE_NEUTRAL,
-            canBuzz = prefs[KEY_CAN_BUZZ] ?: false,
-            buzzRelay = prefs[KEY_BUZZ_RELAY] ?: 0,
-            buzzRelayName = prefs[KEY_BUZZ_RELAY_NAME] ?: "Gate",
-            unitCode = prefs[KEY_UNIT_CODE]?.ifBlank { null },
-            busy = prefs[KEY_BUSY] ?: false,
-        )
+        fun snapshotFromPrefs(prefs: Preferences): GateWidgetSnapshot {
+            val decodedRelays = prefs[KEY_RELAYS_JSON]?.takeIf { it.isNotBlank() }?.let { raw ->
+                runCatching { ApiClientFactory.json.decodeFromString<List<WidgetRelayEntry>>(raw) }.getOrNull()
+            }.orEmpty()
+            return GateWidgetSnapshot(
+                signedIn = prefs[KEY_SIGNED_IN] ?: false,
+                gatePhone = prefs[KEY_GATE_PHONE].orEmpty(),
+                gateName = prefs[KEY_GATE_NAME] ?: "Doorking Gate",
+                subtitle = prefs[KEY_SUBTITLE] ?: "Tap to open app",
+                statusText = prefs[KEY_STATUS_TEXT] ?: "Tap refresh",
+                statusTone = prefs[KEY_STATUS_TONE] ?: GateWidgetSnapshot.TONE_NEUTRAL,
+                canBuzz = prefs[KEY_CAN_BUZZ] ?: false,
+                buzzRelay = prefs[KEY_BUZZ_RELAY] ?: 0,
+                buzzRelayName = prefs[KEY_BUZZ_RELAY_NAME] ?: "Gate",
+                relays = decodedRelays,
+                unitCode = prefs[KEY_UNIT_CODE]?.ifBlank { null },
+                busy = prefs[KEY_BUSY] ?: false,
+            )
+        }
     }
 }
 
@@ -259,23 +267,65 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
                 )
             }
             snapshot.canBuzz && snapshot.gatePhone.isNotBlank() -> {
-                Button(
-                    text = if (snapshot.busy) "Opening ${snapshot.buzzRelayName}…" else "Open ${snapshot.buzzRelayName}",
-                    enabled = !snapshot.busy,
-                    colors = ButtonDefaults.buttonColors(
-                        backgroundColor = GlanceTheme.colors.primary,
-                        contentColor = GlanceTheme.colors.onPrimary,
-                    ),
-                    onClick = actionRunCallback<BuzzGateWidgetAction>(
-                        actionParametersOf(
-                            BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
-                            BuzzGateWidgetAction.KEY_RELAY to snapshot.buzzRelay,
-                            BuzzGateWidgetAction.KEY_RELAY_NAME to snapshot.buzzRelayName,
-                            BuzzGateWidgetAction.KEY_UNIT_CODE to snapshot.unitCode.orEmpty(),
-                        ),
-                    ),
-                    modifier = GlanceModifier.fillMaxWidth(),
-                )
+                val visibleRelays = snapshot.relays
+                    .ifEmpty { listOf(WidgetRelayEntry(snapshot.buzzRelay, snapshot.buzzRelayName)) }
+                    .take(6)
+                when {
+                    visibleRelays.size == 1 -> {
+                        val entry = visibleRelays.first()
+                        RelayBuzzButton(
+                            snapshot = snapshot,
+                            entry = entry,
+                            label = if (snapshot.busy) "Opening ${entry.name}…" else "Open ${entry.name}",
+                            modifier = GlanceModifier.fillMaxWidth(),
+                        )
+                    }
+                    visibleRelays.size in 2..3 && size.width < 220.dp -> {
+                        Column(modifier = GlanceModifier.fillMaxWidth()) {
+                            visibleRelays.forEachIndexed { idx, entry ->
+                                if (idx > 0) Spacer(GlanceModifier.height(6.dp))
+                                RelayBuzzButton(
+                                    snapshot = snapshot,
+                                    entry = entry,
+                                    label = if (snapshot.busy) "Opening…" else entry.name,
+                                    modifier = GlanceModifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                    visibleRelays.size in 2..3 -> {
+                        Row(modifier = GlanceModifier.fillMaxWidth()) {
+                            visibleRelays.forEachIndexed { idx, entry ->
+                                if (idx > 0) Spacer(GlanceModifier.width(6.dp))
+                                RelayBuzzButton(
+                                    snapshot = snapshot,
+                                    entry = entry,
+                                    label = if (snapshot.busy) "Opening…" else entry.name,
+                                    modifier = GlanceModifier.defaultWeight(),
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        val rows = visibleRelays.chunked(2)
+                        Column(modifier = GlanceModifier.fillMaxWidth()) {
+                            rows.forEachIndexed { rowIdx, pair ->
+                                if (rowIdx > 0) Spacer(GlanceModifier.height(6.dp))
+                                Row(modifier = GlanceModifier.fillMaxWidth()) {
+                                    pair.forEachIndexed { colIdx, entry ->
+                                        if (colIdx > 0) Spacer(GlanceModifier.width(6.dp))
+                                        RelayBuzzButton(
+                                            snapshot = snapshot,
+                                            entry = entry,
+                                            label = if (snapshot.busy) "Opening…" else entry.name,
+                                            modifier = GlanceModifier.defaultWeight(),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             else -> {
                 Button(
@@ -286,4 +336,31 @@ private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
             }
         }
     }
+}
+
+@Composable
+private fun RelayBuzzButton(
+    snapshot: GateWidgetSnapshot,
+    entry: WidgetRelayEntry,
+    label: String,
+    modifier: GlanceModifier,
+) {
+    Button(
+        text = label,
+        enabled = !snapshot.busy,
+        maxLines = 1,
+        colors = ButtonDefaults.buttonColors(
+            backgroundColor = GlanceTheme.colors.primary,
+            contentColor = GlanceTheme.colors.onPrimary,
+        ),
+        onClick = actionRunCallback<BuzzGateWidgetAction>(
+            actionParametersOf(
+                BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
+                BuzzGateWidgetAction.KEY_RELAY to entry.relay,
+                BuzzGateWidgetAction.KEY_RELAY_NAME to entry.name,
+                BuzzGateWidgetAction.KEY_UNIT_CODE to snapshot.unitCode.orEmpty(),
+            ),
+        ),
+        modifier = modifier,
+    )
 }

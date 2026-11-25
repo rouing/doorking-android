@@ -15,6 +15,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.doorking.gate.DoorkingApp
+import com.doorking.gate.core.network.ApiClientFactory
+import com.doorking.gate.tile.GateRelayTileConfig
+import com.doorking.gate.tile.GateRelayTileManager
 import kotlinx.coroutines.delay
 
 /**
@@ -61,6 +64,7 @@ object GateWidgetUpdater {
     }
 
     suspend fun writeSnapshotToAll(context: Context, snapshot: GateWidgetSnapshot) {
+        val relaysJson = ApiClientFactory.json.encodeToString(snapshot.relays)
         val widget = GateQuickWidget()
         val ids = GlanceAppWidgetManager(context).getGlanceIds(GateQuickWidget::class.java)
         for (glanceId in ids) {
@@ -74,11 +78,26 @@ object GateWidgetUpdater {
                 prefs[GateQuickWidget.KEY_CAN_BUZZ] = snapshot.canBuzz
                 prefs[GateQuickWidget.KEY_BUZZ_RELAY] = snapshot.buzzRelay
                 prefs[GateQuickWidget.KEY_BUZZ_RELAY_NAME] = snapshot.buzzRelayName
+                prefs[GateQuickWidget.KEY_RELAYS_JSON] = relaysJson
                 prefs[GateQuickWidget.KEY_UNIT_CODE] = snapshot.unitCode.orEmpty()
                 prefs[GateQuickWidget.KEY_BUSY] = snapshot.busy
             }
             // Explicit update required after updateAppWidgetState (per glance-appwidget-updates-and-memory).
             widget.update(context, glanceId)
+        }
+        if (!snapshot.signedIn) {
+            GateRelayTileManager.syncVisibleRelays(context, emptyList())
+        } else if (snapshot.statusText != "Offline") {
+            val tileConfigs = snapshot.relays.map { entry ->
+                GateRelayTileConfig(
+                    gatePhone = snapshot.gatePhone,
+                    gateName = snapshot.gateName,
+                    relay = entry.relay,
+                    relayName = entry.name,
+                    unitCode = snapshot.unitCode,
+                )
+            }
+            GateRelayTileManager.syncVisibleRelays(context, tileConfigs)
         }
     }
 

@@ -5,6 +5,7 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.BuzzRequest
 import com.doorking.gate.core.network.DoorkingApi
+import com.doorking.gate.core.network.PortalStatusReply
 
 data class CarRelayTile(
     val key: String,
@@ -89,19 +90,7 @@ object CarGateRepository {
             val gateName = portalMe.gate.siteName.ifBlank { phone }
             gateNames.add(gateName)
             val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
-            val isBusy = status != null && !status.available
-            val cooldownSec = status?.cooldownSeconds ?: 0
-            val (statusText, canBuzz) = when {
-                portalMe.portal.requirePasskeyForBuzz -> "Passkey on phone" to false
-                isBusy -> {
-                    val pct = status?.percent?.let { " $it%" } ?: ""
-                    "Busy$pct" to false
-                }
-                cooldownSec > 0 -> {
-                    "Wait ${cooldownSec}s" to false
-                }
-                else -> "Tap to open" to true
-            }
+            val resolved = resolveTileStatus(portalMe.portal.requirePasskeyForBuzz, status)
 
             for (relay in portalMe.portal.buzzRelayLabels) {
                 tiles.add(
@@ -112,11 +101,11 @@ object CarGateRepository {
                         unitCode = portalMe.unit.directoryCode.ifBlank { null },
                         relay = relay.relay,
                         relayName = relay.name.ifBlank { "Gate ${relay.relay + 1}" },
-                        statusText = statusText,
-                        canBuzz = canBuzz,
+                        statusText = resolved.statusText,
+                        canBuzz = resolved.canBuzz,
                         requirePasskey = portalMe.portal.requirePasskeyForBuzz,
-                        isBusy = isBusy,
-                        cooldownSeconds = cooldownSec,
+                        isBusy = resolved.isBusy,
+                        cooldownSeconds = resolved.cooldownSeconds,
                     ),
                 )
             }
@@ -133,6 +122,62 @@ object CarGateRepository {
             title = title,
             relays = tiles.take(MAX_CAR_GRID_TILES),
             multipleGates = gateNames.size > 1,
+        )
+    }
+
+    /**
+     * Lightweight polling path: calls ONLY `GET /api/portal/gates/{phone}/status` once per distinct
+     * gate phone in [current], updating `statusText`, `canBuzz`, `isBusy`, and `cooldownSeconds` in place.
+     */
+    suspend fun refreshStatusesOnly(
+        api: DoorkingApi,
+        current: CarGateUiState.Ready,
+    ): CarGateUiState.Ready {
+        val statusByPhone = linkedMapOf<String, PortalStatusReply?>()
+        for (phone in current.relays.map { it.gatePhone }.distinct()) {
+            if (phone.isBlank()) continue
+            statusByPhone[phone] = runCatching { api.getPortalStatus(phone) }.getOrNull()
+        }
+        val updatedRelays = current.relays.map { tile ->
+            val status = statusByPhone[tile.gatePhone] ?: return@map tile
+            val resolved = resolveTileStatus(tile.requirePasskey, status)
+            tile.copy(
+                statusText = resolved.statusText,
+                canBuzz = resolved.canBuzz,
+                isBusy = resolved.isBusy,
+                cooldownSeconds = resolved.cooldownSeconds,
+            )
+        }
+        return current.copy(relays = updatedRelays)
+    }
+
+    private data class TileStatus(
+        val statusText: String,
+        val canBuzz: Boolean,
+        val isBusy: Boolean,
+        val cooldownSeconds: Int,
+    )
+
+    private fun resolveTileStatus(
+        requirePasskey: Boolean,
+        status: PortalStatusReply?,
+    ): TileStatus {
+        val isBusy = status != null && !status.available
+        val cooldownSec = status?.cooldownSeconds ?: 0
+        val (statusText, canBuzz) = when {
+            requirePasskey -> "Passkey on phone" to false
+            isBusy -> {
+                val pct = status.percent?.let { " $it%" } ?: ""
+                "Busy$pct" to false
+            }
+            cooldownSec > 0 -> "Wait ${cooldownSec}s" to false
+            else -> "Tap to open" to true
+        }
+        return TileStatus(
+            statusText = statusText,
+            canBuzz = canBuzz,
+            isBusy = isBusy,
+            cooldownSeconds = cooldownSec,
         )
     }
 
