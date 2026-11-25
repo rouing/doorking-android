@@ -984,8 +984,42 @@ data class StepUpPasswordRequest(
 )
 
 @Serializable
-data class StepUpBiometricRequest(
-    val biometric: Boolean = true,
+data class StepUpBiometricSignedRequest(
+    val biometricKeyId: String,
+    val challenge: String,
+    val signature: String,
+)
+
+@Serializable
+data class BiometricChallengeRequest(
+    val keyId: String,
+)
+
+@Serializable
+data class BiometricChallengeResponse(
+    val challenge: String = "",
+    val keyId: String = "",
+)
+
+@Serializable
+data class RegisterBiometricKeyRequest(
+    val keyId: String,
+    val publicKeySpki: String,
+    val label: String,
+    val password: String? = null,
+)
+
+@Serializable
+data class BiometricKeyInfoDto(
+    val id: String,
+    val label: String = "",
+    val createdAt: String = "",
+    val lastUsedAt: String? = null,
+)
+
+@Serializable
+data class BiometricKeysReply(
+    val keys: List<BiometricKeyInfoDto> = emptyList(),
 )
 
 @Serializable

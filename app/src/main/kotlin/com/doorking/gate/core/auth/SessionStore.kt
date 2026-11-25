@@ -28,6 +28,7 @@ data class StoredAuthState(
     val lastGatePhone: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val biometricLockEnabled: Boolean = false,
+    val biometricKeyId: String? = null,
     val loaded: Boolean = false,
 )
 
@@ -46,6 +47,7 @@ interface SessionStorage {
     suspend fun setLastGatePhone(phone: String?)
     suspend fun setThemeMode(mode: ThemeMode)
     suspend fun setBiometricLockEnabled(enabled: Boolean)
+    suspend fun setBiometricKeyId(keyId: String?)
 }
 
 fun normalizeServerUrl(raw: String): String {
@@ -81,6 +83,7 @@ class EncryptedSessionStore(
                     lastGatePhone = prefs[KEY_LAST_GATE],
                     themeMode = mode,
                     biometricLockEnabled = prefs[KEY_BIOMETRIC_LOCK] == true,
+                    biometricKeyId = prefs[KEY_BIOMETRIC_KEY_ID],
                     loaded = true,
                 )
             }
@@ -104,11 +107,14 @@ class EncryptedSessionStore(
             it.remove(KEY_SESSION_TOKEN)
             it.remove(KEY_LAST_GATE)
             it.remove(KEY_BIOMETRIC_LOCK)
+            it.remove(KEY_BIOMETRIC_KEY_ID)
         }
+        BiometricKeyManager.deleteLocalKey()
         _state.value = _state.value.copy(
             sessionToken = null,
             lastGatePhone = null,
             biometricLockEnabled = false,
+            biometricKeyId = null,
             loaded = true,
         )
     }
@@ -136,11 +142,19 @@ class EncryptedSessionStore(
         _state.value = _state.value.copy(biometricLockEnabled = enabled)
     }
 
+    override suspend fun setBiometricKeyId(keyId: String?) {
+        dataStore.edit {
+            if (keyId.isNullOrBlank()) it.remove(KEY_BIOMETRIC_KEY_ID) else it[KEY_BIOMETRIC_KEY_ID] = keyId
+        }
+        _state.value = _state.value.copy(biometricKeyId = keyId?.ifBlank { null })
+    }
+
     private companion object {
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_TOKEN = stringPreferencesKey("session_token_enc")
         val KEY_LAST_GATE = stringPreferencesKey("last_gate_phone")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         val KEY_BIOMETRIC_LOCK = booleanPreferencesKey("biometric_lock_enabled")
+        val KEY_BIOMETRIC_KEY_ID = stringPreferencesKey("biometric_key_id")
     }
 }

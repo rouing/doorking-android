@@ -40,6 +40,7 @@ class FakeSessionStorage(
             sessionToken = null,
             lastGatePhone = null,
             biometricLockEnabled = false,
+            biometricKeyId = null,
             loaded = true,
         )
     }
@@ -58,5 +59,9 @@ class FakeSessionStorage(
 
     override suspend fun setBiometricLockEnabled(enabled: Boolean) {
         _state.value = _state.value.copy(biometricLockEnabled = enabled)
+    }
+
+    override suspend fun setBiometricKeyId(keyId: String?) {
+        _state.value = _state.value.copy(biometricKeyId = keyId?.ifBlank { null })
     }
 }

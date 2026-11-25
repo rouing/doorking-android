@@ -109,8 +109,14 @@ interface DoorkingApi {
     @POST("api/me/step-up")
     suspend fun confirmStepUpWithPassword(@Body body: StepUpPasswordRequest): Response<StepUpResponse>
 
+    @POST("api/me/step-up/biometric/options")
+    suspend fun getBiometricStepUpChallenge(@Body body: BiometricChallengeRequest): Response<BiometricChallengeResponse>
+
     @POST("api/me/step-up")
-    suspend fun confirmStepUpWithBiometric(@Body body: StepUpBiometricRequest = StepUpBiometricRequest()): Response<StepUpResponse>
+    suspend fun confirmStepUpWithBiometric(@Body body: StepUpBiometricSignedRequest): Response<StepUpResponse>
+
+    @POST("api/me/biometric-keys")
+    suspend fun registerBiometricKey(@Body body: RegisterBiometricKeyRequest): Response<BiometricKeysReply>
 
     @POST("api/sso/start")
     suspend fun startSso(@Body body: SsoStartRequest): Response<SsoStartResponse>

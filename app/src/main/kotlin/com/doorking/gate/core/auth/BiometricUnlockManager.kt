@@ -8,6 +8,7 @@ import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import java.security.Signature
 
 const val BIOMETRIC_RELOCK_GRACE_MS = 5_000L
 
@@ -48,6 +49,55 @@ object BiometricUnlockManager {
             cur = cur.baseContext
         }
         return cur as? FragmentActivity
+    }
+
+    fun isStrongBiometricAvailable(context: Context): Boolean {
+        val status = runCatching {
+            BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG)
+        }.getOrDefault(BiometricManager.BIOMETRIC_ERROR_UNSUPPORTED)
+        return status == BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    fun authenticateWithCrypto(
+        activity: FragmentActivity,
+        signature: Signature,
+        title: String = "Confirm it's you",
+        subtitle: String = "Use your fingerprint to verify this action",
+        onSuccess: (Signature) -> Unit,
+        onError: (String) -> Unit = {},
+        onCancelled: () -> Unit = {},
+    ) {
+        val executor = ContextCompat.getMainExecutor(activity)
+        val callback = object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                val unlocked = result.cryptoObject?.signature
+                if (unlocked != null) {
+                    onSuccess(unlocked)
+                } else {
+                    onError("Hardware biometric signature was unavailable")
+                }
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                if (
+                    errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+                    errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON ||
+                    errorCode == BiometricPrompt.ERROR_CANCELED
+                ) {
+                    onCancelled()
+                } else {
+                    onError(errString.toString().ifBlank { "Biometric authentication failed" })
+                }
+            }
+        }
+        val prompt = BiometricPrompt(activity, executor, callback)
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setNegativeButtonText("Cancel")
+            .setAllowedAuthenticators(BIOMETRIC_STRONG)
+            .build()
+        prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(signature))
     }
 
     fun authenticate(

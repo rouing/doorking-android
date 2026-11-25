@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.ui.NavDisplay
 import com.doorking.gate.AppContainer
+import com.doorking.gate.core.auth.BiometricKeyManager
 import com.doorking.gate.core.auth.BiometricUnlockManager
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
@@ -64,8 +65,10 @@ import com.doorking.gate.core.network.NativeSsoExchangeRequest
 import com.doorking.gate.core.network.PasskeyAssertionRequest
 import com.doorking.gate.core.network.PasswordResetRequest
 import com.doorking.gate.core.network.SessionResponse
+import com.doorking.gate.core.network.BiometricChallengeRequest
+import com.doorking.gate.core.network.RegisterBiometricKeyRequest
 import com.doorking.gate.core.network.SsoStartRequest
-import com.doorking.gate.core.network.StepUpBiometricRequest
+import com.doorking.gate.core.network.StepUpBiometricSignedRequest
 import com.doorking.gate.core.network.StepUpPasswordRequest
 import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.ErrorBanner
@@ -341,8 +344,55 @@ class SessionBootstrapViewModel(
         true
     }
 
-    suspend fun completeBiometricStepUp(): Result<Boolean> = runCatching {
-        val confirmRes = api.confirmStepUpWithBiometric(StepUpBiometricRequest(biometric = true))
+    /**
+     * Silently enrolls a hardware-backed ECDSA P-256 keypair in Android Keystore and registers its public key
+     * on the server while the session is fresh/strong. Safe no-op on devices without strong biometrics or if
+     * already registered and valid.
+     */
+    suspend fun ensureBiometricKeyRegistered(context: Context) {
+        if (!BiometricUnlockManager.isStrongBiometricAvailable(context)) return
+        val existingId = sessionStorage.state.value.biometricKeyId
+        if (!existingId.isNullOrBlank() && BiometricKeyManager.initSigningCrypto() != null) return
+        runCatching {
+            val mat = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                BiometricKeyManager.generateFreshKey()
+            }
+            val res = api.registerBiometricKey(
+                RegisterBiometricKeyRequest(
+                    keyId = mat.keyId,
+                    publicKeySpki = mat.publicKeySpkiBase64,
+                    label = mat.label,
+                ),
+            )
+            if (res.isSuccessful) {
+                sessionStorage.setBiometricKeyId(mat.keyId)
+            }
+        }
+    }
+
+    suspend fun requestBiometricStepUpChallenge(): Result<Pair<String, String>> = runCatching {
+        val keyId = sessionStorage.state.value.biometricKeyId?.takeIf { it.isNotBlank() }
+            ?: error("Fingerprint step-up key not registered on this device")
+        val res = api.getBiometricStepUpChallenge(BiometricChallengeRequest(keyId = keyId))
+        if (!res.isSuccessful) {
+            if (res.code() == 404) {
+                sessionStorage.setBiometricKeyId(null)
+            }
+            error(parseErrorBody(res.errorBody()?.string(), res.code(), "Fingerprint challenge unavailable"))
+        }
+        val body = res.body() ?: error("Empty biometric challenge")
+        if (body.challenge.isBlank()) error("Empty biometric challenge")
+        keyId to body.challenge
+    }
+
+    suspend fun submitSignedBiometricStepUp(keyId: String, challenge: String, signatureBase64: String): Result<Boolean> = runCatching {
+        val confirmRes = api.confirmStepUpWithBiometric(
+            StepUpBiometricSignedRequest(
+                biometricKeyId = keyId,
+                challenge = challenge,
+                signature = signatureBase64,
+            ),
+        )
         if (!confirmRes.isSuccessful) error(parseErrorBody(confirmRes.errorBody()?.string(), confirmRes.code(), "Fingerprint confirmation refused"))
         true
     }
@@ -486,6 +536,7 @@ fun DoorkingNavRoot(container: AppContainer) {
                         api = container.api,
                         sessionStorage = container.sessionStorage,
                     )
+                    vm.ensureBiometricKeyRegistered(container.appContext)
                 }
             }
             is BootstrapState.OfflineError -> Unit
@@ -495,9 +546,15 @@ fun DoorkingNavRoot(container: AppContainer) {
     if (pendingStepUp != null) {
         StepUpConfirmationDialog(
             pending = pendingStepUp!!,
-            onConfirmBiometric = { vm.completeBiometricStepUp() },
-            onConfirmPasskey = { ctx -> vm.completePasskeyStepUp(ctx) },
-            onConfirmPassword = { pw -> vm.completePasswordStepUp(pw) },
+            biometricKeyId = storedAuth.biometricKeyId,
+            onRequestBiometricChallenge = { vm.requestBiometricStepUpChallenge() },
+            onSubmitBiometricSignature = { keyId, challenge, sig -> vm.submitSignedBiometricStepUp(keyId, challenge, sig) },
+            onConfirmPasskey = { ctx ->
+                vm.completePasskeyStepUp(ctx).also { if (it.getOrDefault(false)) vm.ensureBiometricKeyRegistered(container.appContext) }
+            },
+            onConfirmPassword = { pw ->
+                vm.completePasswordStepUp(pw).also { if (it.getOrDefault(false)) vm.ensureBiometricKeyRegistered(container.appContext) }
+            },
             onResolve = container.stepUpCoordinator::resolve,
         )
     }
@@ -624,19 +681,24 @@ fun DoorkingNavRoot(container: AppContainer) {
 @Composable
 private fun StepUpConfirmationDialog(
     pending: PendingStepUp,
-    onConfirmBiometric: suspend () -> Result<Boolean>,
+    biometricKeyId: String?,
+    onRequestBiometricChallenge: suspend () -> Result<Pair<String, String>>,
+    onSubmitBiometricSignature: suspend (keyId: String, challenge: String, signatureBase64: String) -> Result<Boolean>,
     onConfirmPasskey: suspend (Context) -> Result<Boolean>,
     onConfirmPassword: suspend (String) -> Result<Boolean>,
     onResolve: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val biometricAvailable = remember(context) {
-        BiometricUnlockManager.isAvailable(context) && BiometricUnlockManager.findFragmentActivity(context) != null
+    val biometricAvailable = remember(context, biometricKeyId) {
+        !biometricKeyId.isNullOrBlank() &&
+            BiometricUnlockManager.isStrongBiometricAvailable(context) &&
+            BiometricUnlockManager.findFragmentActivity(context) != null &&
+            BiometricKeyManager.initSigningCrypto() != null
     }
     val hasPasskey = pending.error.hasPasskey
     val canUsePassword = pending.error.canUsePassword
-    var usePasswordMode by remember(pending) { mutableStateOf(!biometricAvailable && !hasPasskey && canUsePassword) }
+    var usePasswordMode by remember(pending, biometricAvailable) { mutableStateOf(!biometricAvailable && !hasPasskey && canUsePassword) }
     var password by remember(pending) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -662,30 +724,51 @@ private fun StepUpConfirmationDialog(
         if (busy) return
         busy = true
         error = null
-        BiometricUnlockManager.authenticate(
-            activity = activity,
-            title = "Confirm it's you",
-            subtitle = "Use your fingerprint or screen lock to continue",
-            onSuccess = {
-                scope.launch {
-                    onConfirmBiometric()
-                        .onSuccess { ok ->
-                            if (ok) onResolve(true) else busy = false
-                        }
-                        .onFailure { err ->
-                            error = err.message ?: "Fingerprint confirmation failed"
-                            busy = false
-                        }
+        scope.launch {
+            val cryptoSig = BiometricKeyManager.initSigningCrypto()
+            if (cryptoSig == null) {
+                error = "Hardware fingerprint key was reset. Confirm with passkey or password once to re-enable."
+                busy = false
+                return@launch
+            }
+            onRequestBiometricChallenge()
+                .onFailure { err ->
+                    error = err.message ?: "Could not start fingerprint confirmation"
+                    busy = false
                 }
-            },
-            onError = { msg ->
-                error = msg
-                busy = false
-            },
-            onCancelled = {
-                busy = false
-            },
-        )
+                .onSuccess { (keyId, challenge) ->
+                    BiometricUnlockManager.authenticateWithCrypto(
+                        activity = activity,
+                        signature = cryptoSig,
+                        title = "Confirm it's you",
+                        subtitle = "Scan your fingerprint to sign this verification",
+                        onSuccess = { unlockedSig ->
+                            scope.launch {
+                                runCatching { BiometricKeyManager.signChallenge(unlockedSig, challenge) }
+                                    .onFailure { err ->
+                                        error = err.message ?: "Hardware signing failed"
+                                        busy = false
+                                    }
+                                    .onSuccess { sigB64 ->
+                                        onSubmitBiometricSignature(keyId, challenge, sigB64)
+                                            .onSuccess { ok -> if (ok) onResolve(true) else busy = false }
+                                            .onFailure { err ->
+                                                error = err.message ?: "Fingerprint confirmation failed"
+                                                busy = false
+                                            }
+                                    }
+                            }
+                        },
+                        onError = { msg ->
+                            error = msg
+                            busy = false
+                        },
+                        onCancelled = {
+                            busy = false
+                        },
+                    )
+                }
+        }
     }
 
     AlertDialog(
