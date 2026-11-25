@@ -35,8 +35,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 24
-    versionName = "1.0.23"
+    versionCode = 25
+    versionName = "1.0.24"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
