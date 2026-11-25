@@ -37,6 +37,8 @@ data class LoginResponse(
 data class SsoProviderInfo(
     val id: String,
     val name: String,
+    val googleClientId: String? = null,
+    val hostedDomain: String? = null,
 )
 
 @Serializable
@@ -167,6 +169,25 @@ data class SsoStartResponse(
 data class NativeSsoExchangeRequest(
     val code: String,
     val verifier: String,
+)
+
+@Serializable
+data class GoogleNonceRequest(
+    val provider: String,
+)
+
+@Serializable
+data class GoogleNonceResponse(
+    val nonce: String,
+    val clientId: String,
+    val hostedDomain: String? = null,
+)
+
+@Serializable
+data class GoogleIdTokenRequest(
+    val provider: String,
+    val idToken: String,
+    val nonce: String,
 )
 
 @Serializable

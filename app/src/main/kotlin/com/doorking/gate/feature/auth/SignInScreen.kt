@@ -65,6 +65,7 @@ import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
 import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
+import com.doorking.gate.navigation.GoogleSsoOutcome
 import kotlinx.coroutines.launch
 import java.net.URI
 
@@ -109,6 +110,9 @@ fun SignInScreen(
     onSignInPasskey: suspend (serverUrl: String, activityContext: Context) -> Result<SessionResponse?>,
     onRequestPasswordReset: suspend (serverUrl: String, identifier: String) -> Result<String>,
     onStartSso: suspend (serverUrl: String, providerId: String) -> Result<String>,
+    onSignInGoogleNative: suspend (serverUrl: String, providerId: String, activityContext: Context) -> Result<GoogleSsoOutcome> = { _, _, _ ->
+        Result.success(GoogleSsoOutcome.FallbackToBrowser)
+    },
 ) {
     var serverUrl by remember(initialServerUrl) { mutableStateOf(initialServerUrl) }
     var serverInfo by remember(initialSessionInfo) { mutableStateOf(initialSessionInfo) }
@@ -153,6 +157,24 @@ fun SignInScreen(
                 busy = false
             }
         }
+    }
+
+    suspend fun launchBrowserSso(provider: SsoProviderInfo) {
+        onStartSso(serverUrl, provider.id)
+            .onSuccess { authUrl ->
+                if (!isValidExternalBrowserUrl(authUrl)) {
+                    error = "Server returned an invalid sign-in URL."
+                } else {
+                    runCatching {
+                        launchPinnedCustomTab(context, authUrl)
+                    }.onFailure { err ->
+                        error = err.message ?: "Could not open browser for ${provider.name}"
+                    }
+                }
+            }
+            .onFailure { err ->
+                error = err.message ?: "SSO failed"
+            }
     }
 
     if (showForgotDialog) {
@@ -336,22 +358,23 @@ fun SignInScreen(
                             onClick = {
                                 busy = true
                                 error = null
+                                onClearExternalError()
                                 scope.launch {
-                                    onStartSso(serverUrl, provider.id)
-                                        .onSuccess { authUrl ->
-                                            if (!isValidExternalBrowserUrl(authUrl)) {
-                                                error = "Server returned an invalid sign-in URL."
-                                            } else {
-                                                runCatching {
-                                                    launchPinnedCustomTab(context, authUrl)
-                                                }.onFailure { err ->
-                                                    error = err.message ?: "Could not open browser for ${provider.name}"
+                                    if (!provider.googleClientId.isNullOrBlank()) {
+                                        onSignInGoogleNative(serverUrl, provider.id, context)
+                                            .onSuccess { outcome ->
+                                                when (outcome) {
+                                                    is GoogleSsoOutcome.SignedIn -> Unit
+                                                    GoogleSsoOutcome.Cancelled -> Unit
+                                                    GoogleSsoOutcome.FallbackToBrowser -> launchBrowserSso(provider)
                                                 }
                                             }
-                                        }
-                                        .onFailure { err ->
-                                            error = err.message ?: "SSO failed"
-                                        }
+                                            .onFailure { err ->
+                                                error = err.message ?: "Google sign-in failed"
+                                            }
+                                    } else {
+                                        launchBrowserSso(provider)
+                                    }
                                     busy = false
                                 }
                             },

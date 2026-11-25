@@ -4,16 +4,23 @@ import android.content.Context
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
 import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.PublicKeyCredential
 import androidx.credentials.exceptions.CreateCredentialCancellationException
 import androidx.credentials.exceptions.CreateCredentialException
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialCustomException
 import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.GetCredentialProviderConfigurationException
 import androidx.credentials.exceptions.NoCredentialException
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.StepUpCoordinator
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +34,13 @@ sealed interface PasskeyResult {
     data class Error(val message: String) : PasskeyResult
 }
 
+sealed interface GoogleSignInResult {
+    data class Success(val idToken: String) : GoogleSignInResult
+    data object Cancelled : GoogleSignInResult
+    data class FallbackToBrowser(val reason: String) : GoogleSignInResult
+    data class Error(val message: String) : GoogleSignInResult
+}
+
 /**
  * Abstraction over Android Credential Manager passkey assertions so auth flows can be tested locally with a fake.
  */
@@ -34,6 +48,12 @@ interface PasskeyAuthenticator {
     suspend fun authenticate(activityContext: Context, requestJson: String): PasskeyResult
     suspend fun register(activityContext: Context, requestJson: String): PasskeyResult =
         PasskeyResult.Error("Passkey registration is not supported here.")
+    suspend fun signInWithGoogle(
+        activityContext: Context,
+        serverClientId: String,
+        nonce: String,
+        hostedDomain: String? = null,
+    ): GoogleSignInResult = GoogleSignInResult.FallbackToBrowser("Not supported")
 }
 
 class AndroidPasskeyManager : PasskeyAuthenticator {
@@ -72,6 +92,64 @@ class AndroidPasskeyManager : PasskeyAuthenticator {
             PasskeyResult.Error(err.errorMessage?.toString() ?: err.message ?: "Could not save passkey on this device.")
         } catch (err: Throwable) {
             PasskeyResult.Error(err.message ?: "Could not save passkey on this device.")
+        }
+    }
+
+    override suspend fun signInWithGoogle(
+        activityContext: Context,
+        serverClientId: String,
+        nonce: String,
+        hostedDomain: String?,
+    ): GoogleSignInResult {
+        val manager = CredentialManager.create(activityContext)
+        val option = GetSignInWithGoogleOption.Builder(serverClientId)
+            .setNonce(nonce)
+            .apply {
+                if (!hostedDomain.isNullOrBlank()) {
+                    setHostedDomainFilter(hostedDomain)
+                }
+            }
+            .build()
+        val request = GetCredentialRequest(listOf(option))
+        return try {
+            val result = manager.getCredential(context = activityContext, request = request)
+            val cred = result.credential
+            if (cred is CustomCredential &&
+                cred.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+            ) {
+                val idToken = GoogleIdTokenCredential.createFrom(cred.data).idToken
+                if (idToken.isBlank()) {
+                    GoogleSignInResult.FallbackToBrowser("Empty Google ID token returned by device.")
+                } else {
+                    GoogleSignInResult.Success(idToken)
+                }
+            } else {
+                GoogleSignInResult.FallbackToBrowser("Unsupported credential type returned by device.")
+            }
+        } catch (_: GetCredentialCancellationException) {
+            GoogleSignInResult.Cancelled
+        } catch (err: NoCredentialException) {
+            GoogleSignInResult.FallbackToBrowser(
+                err.errorMessage?.toString() ?: err.message ?: "No Google credential available.",
+            )
+        } catch (err: GetCredentialProviderConfigurationException) {
+            GoogleSignInResult.FallbackToBrowser(
+                err.errorMessage?.toString() ?: err.message ?: "Google Sign-In provider unavailable.",
+            )
+        } catch (err: GetCredentialCustomException) {
+            GoogleSignInResult.FallbackToBrowser(
+                err.errorMessage?.toString() ?: err.message ?: "Google Sign-In custom error.",
+            )
+        } catch (err: GetCredentialException) {
+            GoogleSignInResult.FallbackToBrowser(
+                err.errorMessage?.toString() ?: err.message ?: "Google Sign-In unavailable.",
+            )
+        } catch (err: GoogleIdTokenParsingException) {
+            GoogleSignInResult.Error(err.message ?: "Could not parse Google ID token.")
+        } catch (err: CancellationException) {
+            throw err
+        } catch (err: Throwable) {
+            GoogleSignInResult.Error(err.message ?: "Google Sign-In failed.")
         }
     }
 }

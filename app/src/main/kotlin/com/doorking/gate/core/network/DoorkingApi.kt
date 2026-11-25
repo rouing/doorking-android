@@ -151,6 +151,12 @@ interface DoorkingApi {
     @POST("api/sso/native-exchange")
     suspend fun exchangeNativeSso(@Body body: NativeSsoExchangeRequest): Response<LoginResponse>
 
+    @POST("api/sso/google-nonce")
+    suspend fun getGoogleSsoNonce(@Body body: GoogleNonceRequest): Response<GoogleNonceResponse>
+
+    @POST("api/sso/google-id-token")
+    suspend fun signInWithGoogleIdToken(@Body body: GoogleIdTokenRequest): Response<LoginResponse>
+
     // --- Gates ---
 
     @GET("api/gates")

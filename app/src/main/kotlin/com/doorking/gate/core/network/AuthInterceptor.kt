@@ -179,6 +179,8 @@ class DoorkingAuthInterceptor(
             "/api/server-info",
             "/api/sso/start",
             "/api/sso/native-exchange",
+            "/api/sso/google-nonce",
+            "/api/sso/google-id-token",
             "/api/passkey/options",
             "/api/passkey/session",
         )
@@ -193,6 +195,7 @@ class DoorkingAuthInterceptor(
             "/api/session",
             "/api/passkey/session",
             "/api/sso/native-exchange",
+            "/api/sso/google-id-token",
             "/api/setup",
             "/api/invite",
         )

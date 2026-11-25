@@ -1,4 +1,4 @@
-• Guided post-invite Passkey & Fingerprint lock setup
+• Native Sign in with Google bottom-sheet account picker (with Google Workspace support) & smoother SSO fallback
+• Guided post-invite Passkey & Fingerprint lock quick setup
 • Faster 1-tap gate widgets with live widget picker previews
-• Opt-in crash diagnostics with user-tapped Send button & in-app Privacy Policy
-• Improved security hardening, battery life, camera streaming & startup speed
+• Opt-in crash reports, in-app Privacy Policy, and startup & battery improvements

@@ -49,6 +49,7 @@ import androidx.navigation3.ui.NavDisplay
 import com.doorking.gate.AppContainer
 import com.doorking.gate.core.auth.BiometricKeyManager
 import com.doorking.gate.core.auth.BiometricUnlockManager
+import com.doorking.gate.core.auth.GoogleSignInResult
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.PendingStepUp
@@ -63,6 +64,8 @@ import com.doorking.gate.core.network.BiometricChallengeRequest
 import com.doorking.gate.core.network.ChangePasswordRequest
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.GateInfoDto
+import com.doorking.gate.core.network.GoogleIdTokenRequest
+import com.doorking.gate.core.network.GoogleNonceRequest
 import com.doorking.gate.core.network.InviteCheckRequest
 import com.doorking.gate.core.network.InviteCheckResponse
 import com.doorking.gate.core.network.LoginRequest
@@ -114,6 +117,12 @@ sealed interface BootstrapState {
     data class OfflineError(val message: String) : BootstrapState
 }
 
+sealed interface GoogleSsoOutcome {
+    data class SignedIn(val session: SessionResponse) : GoogleSsoOutcome
+    data object Cancelled : GoogleSsoOutcome
+    data object FallbackToBrowser : GoogleSsoOutcome
+}
+
 /**
  * Coordinates app startup session bootstrap, password / passkey / SSO sign-in, forced password changes,
  * passkey step-up verification, and global `401` / `403` auth events.
@@ -158,7 +167,10 @@ class SessionBootstrapViewModel(
         }
         if (ssoCallbacks != null) {
             viewModelScope.launch {
-                ssoCallbacks.collect { uri -> handleSsoCallback(uri) }
+                ssoCallbacks.collect { uri ->
+                    (ssoCallbacks as? MutableSharedFlow<Uri>)?.resetReplayCache()
+                    handleSsoCallback(uri)
+                }
             }
         }
         if (inviteLinks != null) {
@@ -318,6 +330,59 @@ class SessionBootstrapViewModel(
             pendingSsoVerifier = body.nativeVerifier
                 ?: error("Server did not return native SSO verifier. Update the server to the latest build.")
             body.url
+        }
+    }
+
+    suspend fun signInWithGoogleNative(
+        serverUrl: String,
+        providerId: String,
+        activityContext: Context,
+    ): Result<GoogleSsoOutcome> {
+        sessionStorage.setServerUrl(serverUrl)
+        _ssoError.value = null
+        return runCatching {
+            val nonceHttp = api.getGoogleSsoNonce(GoogleNonceRequest(provider = providerId))
+            if (!nonceHttp.isSuccessful) {
+                if (nonceHttp.code() == 404 || nonceHttp.code() == 400) {
+                    return@runCatching GoogleSsoOutcome.FallbackToBrowser
+                }
+                error(parseErrorBody(nonceHttp.errorBody()?.string(), nonceHttp.code(), "Could not start Google Sign-In"))
+            }
+            val nonceRes = nonceHttp.body() ?: return@runCatching GoogleSsoOutcome.FallbackToBrowser
+            if (nonceRes.clientId.isBlank() || nonceRes.nonce.isBlank()) {
+                return@runCatching GoogleSsoOutcome.FallbackToBrowser
+            }
+            when (
+                val signIn = passkeyAuthenticator.signInWithGoogle(
+                    activityContext = activityContext,
+                    serverClientId = nonceRes.clientId,
+                    nonce = nonceRes.nonce,
+                    hostedDomain = nonceRes.hostedDomain,
+                )
+            ) {
+                GoogleSignInResult.Cancelled -> GoogleSsoOutcome.Cancelled
+                is GoogleSignInResult.FallbackToBrowser -> GoogleSsoOutcome.FallbackToBrowser
+                is GoogleSignInResult.Error -> error(signIn.message)
+                is GoogleSignInResult.Success -> {
+                    val loginRes = api.signInWithGoogleIdToken(
+                        GoogleIdTokenRequest(
+                            provider = providerId,
+                            idToken = signIn.idToken,
+                            nonce = nonceRes.nonce,
+                        ),
+                    )
+                    if (!loginRes.isSuccessful) {
+                        error(parseErrorBody(loginRes.errorBody()?.string(), loginRes.code(), "Google sign-in failed"))
+                    }
+                    val token = loginRes.body()?.sessionToken
+                        ?: error("Server did not return a native session token.")
+                    sessionStorage.saveSessionToken(token)
+                    val session = api.getSession()
+                    _bootstrap.value = BootstrapState.Ready(resolveStartRoute(session, session.gate?.phoneNumber), session)
+                    onWidgetSync()
+                    GoogleSsoOutcome.SignedIn(session)
+                }
+            }
         }
     }
 
@@ -715,6 +780,7 @@ fun DoorkingNavRoot(container: AppContainer) {
                         onSignInPasskey = vm::signInPasskey,
                         onRequestPasswordReset = vm::requestPasswordReset,
                         onStartSso = vm::startSso,
+                        onSignInGoogleNative = vm::signInWithGoogleNative,
                     )
                 }
 

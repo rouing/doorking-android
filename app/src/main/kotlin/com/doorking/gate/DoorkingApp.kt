@@ -35,7 +35,7 @@ class AppContainer(context: Context) {
     val appContext: Context = context.applicationContext
     val sessionStorage: SessionStorage = EncryptedSessionStore(context)
     val authEvents = AuthEventBus()
-    val ssoCallbacks = MutableSharedFlow<Uri>(extraBufferCapacity = 2)
+    val ssoCallbacks = MutableSharedFlow<Uri>(replay = 1, extraBufferCapacity = 2)
     val inviteLinks = MutableSharedFlow<Uri>(replay = 1, extraBufferCapacity = 2)
     val passkeyApprovalRequests = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 4)
     val passkeyAuthenticator: PasskeyAuthenticator = AndroidPasskeyManager()

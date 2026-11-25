@@ -36,8 +36,8 @@ android {
     applicationId = "com.doorking.gate"
     minSdk = 34
     targetSdk = 37
-    versionCode = 29
-    versionName = "1.0.28"
+    versionCode = 30
+    versionName = "1.0.29"
 
     val defaultServerUrl = keystoreProps.getProperty("defaultServerUrl")
       ?.trim()
@@ -182,9 +182,10 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.navigationevent.compose)
 
-  // Auth (Credential Manager Passkeys, Biometric Fingerprint Unlock & Chrome Custom Tabs SSO)
+  // Auth (Credential Manager Passkeys, Google ID, Biometric Fingerprint Unlock & Chrome Custom Tabs SSO)
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services.auth)
+  implementation(libs.googleid)
   implementation(libs.androidx.biometric)
   implementation(libs.androidx.browser)
 

@@ -2,6 +2,7 @@ package com.doorking.gate.navigation
 
 import android.content.Context
 import android.content.ContextWrapper
+import com.doorking.gate.core.auth.GoogleSignInResult
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.serverOriginOf
@@ -483,6 +484,232 @@ class SessionBootstrapViewModelTest {
             events.emit(AuthEvent.SessionExpired)
             advanceUntilIdle()
             assertEquals(1, widgetSynced)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun signInWithGoogleNativeSucceedsSavesTokenUpdatesBootstrapAndSyncsWidgets() = runTest(testDispatcher) {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            val storage = FakeSessionStorage(initialServerUrl = baseUrl)
+            val events = AuthEventBus()
+            val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, events), "$baseUrl/")
+
+            var capturedClientId: String? = null
+            var capturedNonce: String? = null
+            var capturedHostedDomain: String? = null
+            val fakeAuth = object : PasskeyAuthenticator {
+                override suspend fun authenticate(activityContext: Context, requestJson: String): PasskeyResult =
+                    PasskeyResult.Cancelled
+
+                override suspend fun signInWithGoogle(
+                    activityContext: Context,
+                    serverClientId: String,
+                    nonce: String,
+                    hostedDomain: String?,
+                ): GoogleSignInResult {
+                    capturedClientId = serverClientId
+                    capturedNonce = nonce
+                    capturedHostedDomain = hostedDomain
+                    return GoogleSignInResult.Success("google-id-token-jwt")
+                }
+            }
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":false}"""),
+            )
+            var widgetSynced = 0
+            val vm = SessionBootstrapViewModel(
+                sessionStorage = storage,
+                api = api,
+                authEvents = events,
+                passkeyAuthenticator = fakeAuth,
+                onWidgetSync = { widgetSynced++ },
+            )
+            awaitBootstrap(vm) { it is BootstrapState.Ready }
+            server.takeRequest() // initial /api/session
+
+            val issuedToken = "dks_${"d".repeat(64)}"
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"nonce":"nonce-abc","clientId":"web-cid.apps.googleusercontent.com","hostedDomain":"corp.example.com"}"""),
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"ok":true,"sessionToken":"$issuedToken"}"""),
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":true,"user":"alice","gate":{"phoneNumber":"2145550100","siteName":"Main","role":"admin"}}"""),
+            )
+
+            val result = vm.signInWithGoogleNative(baseUrl, "google", ContextWrapper(null))
+            assertTrue(result.isSuccess)
+            val outcome = result.getOrThrow()
+            assertTrue(outcome is GoogleSsoOutcome.SignedIn)
+            assertEquals("alice", (outcome as GoogleSsoOutcome.SignedIn).session.user)
+            assertEquals("web-cid.apps.googleusercontent.com", capturedClientId)
+            assertEquals("nonce-abc", capturedNonce)
+            assertEquals("corp.example.com", capturedHostedDomain)
+            assertEquals(issuedToken, storage.currentSessionToken())
+            assertEquals(1, widgetSynced)
+
+            val ready = vm.bootstrap.value as BootstrapState.Ready
+            assertEquals(AppRoute.StaffGate("2145550100"), ready.startRoute)
+            assertEquals("alice", ready.session?.user)
+
+            val nonceReq = server.takeRequest()
+            assertEquals("/api/sso/google-nonce", nonceReq.path)
+            assertNull(nonceReq.getHeader("Authorization"))
+
+            val tokenReq = server.takeRequest()
+            assertEquals("/api/sso/google-id-token", tokenReq.path)
+            assertEquals("bearer", tokenReq.getHeader("X-Client-Auth"))
+            assertNull(tokenReq.getHeader("Authorization"))
+            val tokenBody = tokenReq.body.readUtf8()
+            assertTrue(tokenBody.contains("google-id-token-jwt"))
+            assertTrue(tokenBody.contains("nonce-abc"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun signInWithGoogleNativeReturnsCancelledWithoutCallingIdTokenEndpoint() = runTest(testDispatcher) {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            val storage = FakeSessionStorage(initialServerUrl = baseUrl)
+            val events = AuthEventBus()
+            val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, events), "$baseUrl/")
+
+            val fakeAuth = object : PasskeyAuthenticator {
+                override suspend fun authenticate(activityContext: Context, requestJson: String): PasskeyResult =
+                    PasskeyResult.Cancelled
+
+                override suspend fun signInWithGoogle(
+                    activityContext: Context,
+                    serverClientId: String,
+                    nonce: String,
+                    hostedDomain: String?,
+                ): GoogleSignInResult = GoogleSignInResult.Cancelled
+            }
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":false}"""),
+            )
+            var widgetSynced = 0
+            val vm = SessionBootstrapViewModel(
+                sessionStorage = storage,
+                api = api,
+                authEvents = events,
+                passkeyAuthenticator = fakeAuth,
+                onWidgetSync = { widgetSynced++ },
+            )
+            awaitBootstrap(vm) { it is BootstrapState.Ready }
+            server.takeRequest() // initial /api/session
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"nonce":"nonce-cancel","clientId":"web-cid.apps.googleusercontent.com"}"""),
+            )
+
+            val result = vm.signInWithGoogleNative(baseUrl, "google", ContextWrapper(null))
+            assertTrue(result.isSuccess)
+            assertEquals(GoogleSsoOutcome.Cancelled, result.getOrThrow())
+            assertNull(storage.currentSessionToken())
+            assertEquals(0, widgetSynced)
+            assertEquals("/api/sso/google-nonce", server.takeRequest().path)
+            assertEquals(2, server.requestCount) // initial session + nonce only
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun signInWithGoogleNativeFallsBackToBrowserOnUnsupportedServerOrCredentialFailure() = runTest(testDispatcher) {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            val storage = FakeSessionStorage(initialServerUrl = baseUrl)
+            val events = AuthEventBus()
+            val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, events), "$baseUrl/")
+
+            var credentialCalls = 0
+            val fakeAuth = object : PasskeyAuthenticator {
+                override suspend fun authenticate(activityContext: Context, requestJson: String): PasskeyResult =
+                    PasskeyResult.Cancelled
+
+                override suspend fun signInWithGoogle(
+                    activityContext: Context,
+                    serverClientId: String,
+                    nonce: String,
+                    hostedDomain: String?,
+                ): GoogleSignInResult {
+                    credentialCalls++
+                    return GoogleSignInResult.FallbackToBrowser("No Android OAuth client configured")
+                }
+            }
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"loggedIn":false}"""),
+            )
+            val vm = SessionBootstrapViewModel(storage, api, events, fakeAuth)
+            awaitBootstrap(vm) { it is BootstrapState.Ready }
+            server.takeRequest() // initial /api/session
+
+            // 1. Older server returns 404 on /api/sso/google-nonce -> FallbackToBrowser without invoking Credential Manager.
+            server.enqueue(
+                MockResponse().setResponseCode(404)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"error":"Not found"}"""),
+            )
+            val olderServer = vm.signInWithGoogleNative(baseUrl, "google", ContextWrapper(null))
+            assertTrue(olderServer.isSuccess)
+            assertEquals(GoogleSsoOutcome.FallbackToBrowser, olderServer.getOrThrow())
+            assertEquals(0, credentialCalls)
+            assertEquals("/api/sso/google-nonce", server.takeRequest().path)
+
+            // 2. Server returns 400 -> FallbackToBrowser.
+            server.enqueue(
+                MockResponse().setResponseCode(400)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"error":"Provider does not support native Google Sign-In"}"""),
+            )
+            val badReq = vm.signInWithGoogleNative(baseUrl, "google", ContextWrapper(null))
+            assertTrue(badReq.isSuccess)
+            assertEquals(GoogleSsoOutcome.FallbackToBrowser, badReq.getOrThrow())
+            assertEquals(0, credentialCalls)
+            assertEquals("/api/sso/google-nonce", server.takeRequest().path)
+
+            // 3. Server returns nonce, Credential Manager returns FallbackToBrowser -> FallbackToBrowser.
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .addHeader("Content-Type", "application/json")
+                    .setBody("""{"nonce":"nonce-fb","clientId":"web-cid.apps.googleusercontent.com"}"""),
+            )
+            val cmFallback = vm.signInWithGoogleNative(baseUrl, "google", ContextWrapper(null))
+            assertTrue(cmFallback.isSuccess)
+            assertEquals(GoogleSsoOutcome.FallbackToBrowser, cmFallback.getOrThrow())
+            assertEquals(1, credentialCalls)
+            assertEquals("/api/sso/google-nonce", server.takeRequest().path)
+            assertEquals(4, server.requestCount) // no /api/sso/google-id-token request sent
         } finally {
             server.shutdown()
         }

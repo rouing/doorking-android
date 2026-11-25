@@ -335,4 +335,49 @@ class AuthInterceptorTest {
         val ssoReq = server.takeRequest()
         assertEquals("bearer", ssoReq.getHeader("X-Client-Auth"))
     }
+
+    @Test
+    fun googleSsoEndpointsOmitAuthorizationAndIdTokenRequestsBearerSession() = runTest {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val existingToken = "dks_${"5".repeat(64)}"
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = existingToken)
+        val events = AuthEventBus()
+        val client = ApiClientFactory.createOkHttp(storage, events)
+        val api = ApiClientFactory.createApi(client, baseUrl = "$baseUrl/")
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"nonce":"n-1","clientId":"cid.apps.googleusercontent.com","hostedDomain":"example.com"}"""),
+        )
+        val nonceRes = api.getGoogleSsoNonce(GoogleNonceRequest(provider = "google"))
+        assertTrue(nonceRes.isSuccessful)
+        assertEquals("n-1", nonceRes.body()?.nonce)
+        assertEquals("cid.apps.googleusercontent.com", nonceRes.body()?.clientId)
+        assertEquals("example.com", nonceRes.body()?.hostedDomain)
+
+        val nonceReq = server.takeRequest()
+        assertEquals("/api/sso/google-nonce", nonceReq.path)
+        assertNull(nonceReq.getHeader("Authorization"))
+        assertNull(nonceReq.getHeader("X-Client-Auth"))
+
+        val issuedToken = "dks_${"6".repeat(64)}"
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"ok":true,"sessionToken":"$issuedToken"}"""),
+        )
+        val tokenRes = api.signInWithGoogleIdToken(
+            GoogleIdTokenRequest(provider = "google", idToken = "jwt-token", nonce = "n-1"),
+        )
+        assertTrue(tokenRes.isSuccessful)
+        assertEquals(issuedToken, tokenRes.body()?.sessionToken)
+
+        val tokenReq = server.takeRequest()
+        assertEquals("/api/sso/google-id-token", tokenReq.path)
+        assertNull(tokenReq.getHeader("Authorization"))
+        assertEquals("bearer", tokenReq.getHeader("X-Client-Auth"))
+    }
 }
