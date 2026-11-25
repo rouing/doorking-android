@@ -109,6 +109,9 @@ interface DoorkingApi {
     @POST("api/me/step-up")
     suspend fun confirmStepUpWithPassword(@Body body: StepUpPasswordRequest): Response<StepUpResponse>
 
+    @POST("api/me/step-up")
+    suspend fun confirmStepUpWithBiometric(@Body body: StepUpBiometricRequest = StepUpBiometricRequest()): Response<StepUpResponse>
+
     @POST("api/sso/start")
     suspend fun startSso(@Body body: SsoStartRequest): Response<SsoStartResponse>
 

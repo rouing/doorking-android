@@ -98,7 +98,53 @@ class GateQuickWidget : GlanceAppWidget() {
 @Composable
 private fun GateWidgetContent(snapshot: GateWidgetSnapshot) {
     val size = LocalSize.current
+    val tiny = size.width < 120.dp || size.height < 90.dp
     val compact = size.height < 120.dp
+
+    if (tiny) {
+        val action = if (snapshot.signedIn && snapshot.canBuzz && snapshot.gatePhone.isNotBlank() && !snapshot.busy) {
+            actionRunCallback<BuzzGateWidgetAction>(
+                actionParametersOf(
+                    BuzzGateWidgetAction.KEY_PHONE to snapshot.gatePhone,
+                    BuzzGateWidgetAction.KEY_RELAY to snapshot.buzzRelay,
+                    BuzzGateWidgetAction.KEY_RELAY_NAME to snapshot.buzzRelayName,
+                    BuzzGateWidgetAction.KEY_UNIT_CODE to snapshot.unitCode.orEmpty(),
+                ),
+            )
+        } else {
+            actionStartActivity<MainActivity>()
+        }
+        Column(
+            modifier = GlanceModifier
+                .fillMaxSize()
+                .appWidgetBackground()
+                .background(if (snapshot.busy) GlanceTheme.colors.tertiaryContainer else GlanceTheme.colors.primaryContainer)
+                .clickable(action)
+                .padding(6.dp),
+            verticalAlignment = Alignment.Vertical.CenterVertically,
+            horizontalAlignment = Alignment.Horizontal.CenterHorizontally,
+        ) {
+            Image(
+                provider = ImageProvider(R.drawable.ic_widget_lock),
+                contentDescription = "Open ${snapshot.buzzRelayName}",
+                colorFilter = ColorFilter.tint(
+                    if (snapshot.busy) GlanceTheme.colors.onTertiaryContainer else GlanceTheme.colors.onPrimaryContainer,
+                ),
+                modifier = GlanceModifier.size(22.dp),
+            )
+            Spacer(GlanceModifier.height(3.dp))
+            Text(
+                text = if (snapshot.busy) "Opening…" else snapshot.buzzRelayName,
+                maxLines = 1,
+                style = TextStyle(
+                    color = if (snapshot.busy) GlanceTheme.colors.onTertiaryContainer else GlanceTheme.colors.onPrimaryContainer,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+        }
+        return
+    }
 
     val statusBg = when (snapshot.statusTone) {
         GateWidgetSnapshot.TONE_SUCCESS -> GlanceTheme.colors.primaryContainer

@@ -429,6 +429,88 @@ fun SystemSettingsScreen(
                             },
                         )
                     }
+
+                    val portalCfg = prefs.residentPortal
+                    val portalEnabled = portalCfg?.enabled == true
+                    val buzzEnabled = portalCfg?.buzzEnabled == true
+                    val activeBuzzRelays = (portalCfg?.buzzRelays ?: listOf(0)).ifEmpty { listOf(0) }
+                    val gateRelays = openableRelayIndices(prefs.tracker)
+
+                    fun savePortalPatch(
+                        nextEnabled: Boolean = portalEnabled,
+                        nextBuzzEnabled: Boolean = buzzEnabled,
+                        nextBuzzRelays: List<Int> = activeBuzzRelays,
+                    ) {
+                        scope.launch {
+                            val body = buildJsonObject {
+                                put(
+                                    "residentPortal",
+                                    buildJsonObject {
+                                        put("enabled", JsonPrimitive(nextEnabled))
+                                        put("buzzEnabled", JsonPrimitive(nextBuzzEnabled))
+                                        put(
+                                            "buzzRelays",
+                                            kotlinx.serialization.json.JsonArray(nextBuzzRelays.distinct().sorted().map { JsonPrimitive(it) }),
+                                        )
+                                        put("pulseSeconds", JsonPrimitive(portalCfg?.pulseSeconds ?: 4))
+                                        put("maxRerollsPerDay", JsonPrimitive(portalCfg?.maxRerollsPerDay ?: 2))
+                                        put("autoSendReroll", JsonPrimitive(portalCfg?.autoSendReroll == true))
+                                        put("showSnapshots", JsonPrimitive(portalCfg?.showSnapshots == true))
+                                        put("allowRequests", JsonPrimitive(portalCfg?.allowRequests != false))
+                                        put("requirePasskeyForBuzz", JsonPrimitive(portalCfg?.requirePasskeyForBuzz == true))
+                                    },
+                                )
+                            }
+                            runCatching { api.updatePrefs(gatePhone, body) }
+                                .onSuccess { load(); onReloadGate() }
+                                .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Enable Resident Portal", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Switch(checked = portalEnabled, onCheckedChange = { savePortalPatch(nextEnabled = it) })
+                    }
+                    if (portalEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Allow residents to Buzz Me In", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Switch(checked = buzzEnabled, onCheckedChange = { savePortalPatch(nextBuzzEnabled = it) })
+                        }
+                        if (buzzEnabled) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = "Relays residents can open (admins always see all relays)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    gateRelays.forEach { relay ->
+                                        val selected = relay in activeBuzzRelays
+                                        val label = relayDisplayName(prefs.relayLabels, relay)
+                                        FilterChip(
+                                            selected = selected,
+                                            onClick = {
+                                                val next = if (selected) activeBuzzRelays.filterNot { it == relay } else activeBuzzRelays + relay
+                                                savePortalPatch(nextBuzzRelays = next.ifEmpty { listOf(gateRelays.first()) })
+                                            },
+                                            label = { Text(label) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     requests.filter { it.status == "pending" }.forEach { req ->
                         BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
                             Text("Unit ${req.directoryCode} · ${req.kind}", style = MaterialTheme.typography.titleSmall)

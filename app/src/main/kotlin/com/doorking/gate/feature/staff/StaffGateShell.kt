@@ -534,6 +534,8 @@ fun StaffGateShell(
                         api = container.api,
                         initialSection = sub.section,
                         readOnly = readOnly,
+                        relayLabels = state.prefs.relayLabels,
+                        tracker = state.prefs.tracker,
                         onDraftChange = { draftActions = it },
                         onMessage = ::showMessage,
                         onSavedToWorkingCopy = { vm.loadAll(initial = false) },

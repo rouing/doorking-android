@@ -322,7 +322,7 @@ fun ThemeModeSelector(
     mode: ThemeMode,
     onSelect: (ThemeMode) -> Unit,
     modifier: Modifier = Modifier,
-    inactiveContainerColor: Color = MaterialTheme.colorScheme.surfaceContainerLowest,
+    inactiveContainerColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
 ) {
     val options = listOf(
         ThemeMode.SYSTEM to "System",

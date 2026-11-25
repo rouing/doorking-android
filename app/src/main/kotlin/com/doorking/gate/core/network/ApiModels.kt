@@ -373,6 +373,8 @@ data class PortalCapabilitiesDto(
     val allowRequests: Boolean = true,
     val requirePasskeyForBuzz: Boolean = false,
     val buzzRelayLabels: List<BuzzRelayLabelDto> = emptyList(),
+    val allBuzzRelayLabels: List<BuzzRelayLabelDto> = emptyList(),
+    val hiddenRelays: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -503,10 +505,18 @@ data class ResidentPortalPrefsDto(
 )
 
 @Serializable
+data class GateTrackerDto(
+    val enabled: Boolean = false,
+    val tracker1: Boolean = false,
+    val tracker2: Boolean = false,
+)
+
+@Serializable
 data class GatePrefsDto(
     val relayLabels: Map<String, String> = emptyMap(),
     val deviceAssociation: List<DeviceRangeDto> = emptyList(),
     val gateConfig: GateConfigDto? = null,
+    val tracker: GateTrackerDto? = null,
     val adminPhone: String = "",
     val requireStrongAdmin: Boolean = false,
     val residentPortal: ResidentPortalPrefsDto? = null,
@@ -831,6 +841,20 @@ data class GatePhoneSyncDto(
 )
 
 @Serializable
+data class PortalRelayOptionDto(
+    val relay: Int,
+    val name: String = "",
+    val hidden: Boolean = false,
+)
+
+@Serializable
+data class PortalGateRelaysDto(
+    val phone: String = "",
+    val siteName: String = "",
+    val relays: List<PortalRelayOptionDto> = emptyList(),
+)
+
+@Serializable
 data class MeProfileDto(
     val username: String = "",
     val email: String = "",
@@ -839,6 +863,8 @@ data class MeProfileDto(
     val dark: Boolean = false,
     val notifyAccess: Boolean = true,
     val notifyAlerts: Boolean = true,
+    val hiddenRelays: Map<String, List<Int>> = emptyMap(),
+    val portalRelays: List<PortalGateRelaysDto> = emptyList(),
     val warning: String? = null,
     val linkedUnits: List<LinkedUnitPhoneDto> = emptyList(),
     val gatePhoneSync: GatePhoneSyncDto? = null,
@@ -955,6 +981,11 @@ data class GenericJsonBody(
 @Serializable
 data class StepUpPasswordRequest(
     val password: String,
+)
+
+@Serializable
+data class StepUpBiometricRequest(
+    val biometric: Boolean = true,
 )
 
 @Serializable

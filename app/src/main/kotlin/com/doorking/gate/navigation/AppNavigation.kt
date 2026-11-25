@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.ui.NavDisplay
 import com.doorking.gate.AppContainer
+import com.doorking.gate.core.auth.BiometricUnlockManager
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.PendingStepUp
@@ -64,6 +65,7 @@ import com.doorking.gate.core.network.PasskeyAssertionRequest
 import com.doorking.gate.core.network.PasswordResetRequest
 import com.doorking.gate.core.network.SessionResponse
 import com.doorking.gate.core.network.SsoStartRequest
+import com.doorking.gate.core.network.StepUpBiometricRequest
 import com.doorking.gate.core.network.StepUpPasswordRequest
 import com.doorking.gate.core.push.FirebaseHelper
 import com.doorking.gate.core.ui.components.ErrorBanner
@@ -339,6 +341,12 @@ class SessionBootstrapViewModel(
         true
     }
 
+    suspend fun completeBiometricStepUp(): Result<Boolean> = runCatching {
+        val confirmRes = api.confirmStepUpWithBiometric(StepUpBiometricRequest(biometric = true))
+        if (!confirmRes.isSuccessful) error(parseErrorBody(confirmRes.errorBody()?.string(), confirmRes.code(), "Fingerprint confirmation refused"))
+        true
+    }
+
     fun onGateSelected(gate: GateInfoDto) {
         val current = (_bootstrap.value as? BootstrapState.Ready)?.session
         val updatedSession = current?.copy(gate = gate)
@@ -487,6 +495,7 @@ fun DoorkingNavRoot(container: AppContainer) {
     if (pendingStepUp != null) {
         StepUpConfirmationDialog(
             pending = pendingStepUp!!,
+            onConfirmBiometric = { vm.completeBiometricStepUp() },
             onConfirmPasskey = { ctx -> vm.completePasskeyStepUp(ctx) },
             onConfirmPassword = { pw -> vm.completePasswordStepUp(pw) },
             onResolve = container.stepUpCoordinator::resolve,
@@ -615,15 +624,19 @@ fun DoorkingNavRoot(container: AppContainer) {
 @Composable
 private fun StepUpConfirmationDialog(
     pending: PendingStepUp,
+    onConfirmBiometric: suspend () -> Result<Boolean>,
     onConfirmPasskey: suspend (Context) -> Result<Boolean>,
     onConfirmPassword: suspend (String) -> Result<Boolean>,
     onResolve: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val biometricAvailable = remember(context) {
+        BiometricUnlockManager.isAvailable(context) && BiometricUnlockManager.findFragmentActivity(context) != null
+    }
     val hasPasskey = pending.error.hasPasskey
     val canUsePassword = pending.error.canUsePassword
-    var usePasswordMode by remember(pending) { mutableStateOf(!hasPasskey && canUsePassword) }
+    var usePasswordMode by remember(pending) { mutableStateOf(!biometricAvailable && !hasPasskey && canUsePassword) }
     var password by remember(pending) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -642,6 +655,37 @@ private fun StepUpConfirmationDialog(
                     busy = false
                 }
         }
+    }
+
+    fun triggerBiometric() {
+        val activity = BiometricUnlockManager.findFragmentActivity(context) ?: return
+        if (busy) return
+        busy = true
+        error = null
+        BiometricUnlockManager.authenticate(
+            activity = activity,
+            title = "Confirm it's you",
+            subtitle = "Use your fingerprint or screen lock to continue",
+            onSuccess = {
+                scope.launch {
+                    onConfirmBiometric()
+                        .onSuccess { ok ->
+                            if (ok) onResolve(true) else busy = false
+                        }
+                        .onFailure { err ->
+                            error = err.message ?: "Fingerprint confirmation failed"
+                            busy = false
+                        }
+                }
+            },
+            onError = { msg ->
+                error = msg
+                busy = false
+            },
+            onCancelled = {
+                busy = false
+            },
+        )
     }
 
     AlertDialog(
@@ -664,7 +708,28 @@ private fun StepUpConfirmationDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                if (hasPasskey && canUsePassword) {
+                if (biometricAvailable && hasPasskey && !usePasswordMode) {
+                    TextButton(
+                        enabled = !busy,
+                        onClick = {
+                            busy = true
+                            error = null
+                            scope.launch {
+                                onConfirmPasskey(context)
+                                    .onSuccess { ok ->
+                                        if (ok) onResolve(true) else busy = false
+                                    }
+                                    .onFailure { err ->
+                                        error = err.message ?: "Passkey confirmation failed"
+                                        busy = false
+                                    }
+                            }
+                        },
+                    ) {
+                        Text("Use passkey instead")
+                    }
+                }
+                if ((biometricAvailable || hasPasskey) && canUsePassword) {
                     TextButton(
                         enabled = !busy,
                         onClick = {
@@ -672,7 +737,13 @@ private fun StepUpConfirmationDialog(
                             usePasswordMode = !usePasswordMode
                         },
                     ) {
-                        Text(if (usePasswordMode) "Use passkey instead" else "Use password instead")
+                        Text(
+                            if (usePasswordMode) {
+                                if (biometricAvailable) "Use fingerprint instead" else "Use passkey instead"
+                            } else {
+                                "Use password instead"
+                            },
+                        )
                     }
                 }
                 if (error != null) ErrorBanner(error!!)
@@ -688,6 +759,17 @@ private fun StepUpConfirmationDialog(
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                     } else {
                         Text("Confirm")
+                    }
+                }
+            } else if (biometricAvailable) {
+                Button(
+                    enabled = !busy,
+                    onClick = { triggerBiometric() },
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                    } else {
+                        Text("Confirm with fingerprint")
                     }
                 }
             } else if (hasPasskey) {

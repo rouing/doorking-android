@@ -61,6 +61,7 @@ import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.DoorkingApi
 import com.doorking.gate.core.network.GateSettingRowDto
+import com.doorking.gate.core.network.GateTrackerDto
 import com.doorking.gate.core.ui.components.BubbleCard
 import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
@@ -266,6 +267,19 @@ private fun WeekdayToggleRow(
     }
 }
 
+fun openableRelayIndices(tracker: GateTrackerDto?): List<Int> {
+    val active = tracker?.takeIf { it.enabled }
+    val base = listOf(0, 1, 2).filter { r ->
+        !(r == 2 && active?.tracker2 == true) && !(r == 1 && active?.tracker1 == true)
+    }.toMutableList()
+    if (active?.tracker2 == true) base.addAll(3..10)
+    if (active?.tracker1 == true) base.addAll(11..18)
+    return base
+}
+
+fun relayDisplayName(relayLabels: Map<String, String>, relay: Int): String =
+    relayLabels[relay.toString()]?.trim()?.takeIf { it.isNotEmpty() } ?: "Relay $relay"
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun BoardSettingsScreen(
@@ -273,10 +287,13 @@ fun BoardSettingsScreen(
     api: DoorkingApi,
     initialSection: BoardSection,
     readOnly: Boolean,
+    relayLabels: Map<String, String> = emptyMap(),
+    tracker: GateTrackerDto? = null,
     onDraftChange: (SettingsDraftActions?) -> Unit,
     onMessage: (String) -> Unit = {},
     onSavedToWorkingCopy: () -> Unit,
 ) {
+    val availableRelays = remember(tracker) { openableRelayIndices(tracker) }
     var section by remember(initialSection) { mutableStateOf(initialSection) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
@@ -683,25 +700,27 @@ fun BoardSettingsScreen(
                                         labelPrefix = tzLabel,
                                         onToggle = { d -> edit(days, toggleBitString(current(days), d, 7)) },
                                     )
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Text(
                                             text = "Relays",
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
-                                        listOf(0, 1, 2).forEach { r ->
-                                            val on = current(relays).getOrNull(r) == '1'
-                                            FilterChip(
-                                                selected = on,
-                                                enabled = !readOnly,
-                                                onClick = { edit(relays, toggleBitString(current(relays), r, 19)) },
-                                                label = { Text("R$r") },
-                                                modifier = Modifier.semantics { contentDescription = "$tzLabel Relay $r" },
-                                            )
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            availableRelays.forEach { r ->
+                                                val on = current(relays).getOrNull(r) == '1'
+                                                val rName = relayDisplayName(relayLabels, r)
+                                                FilterChip(
+                                                    selected = on,
+                                                    enabled = !readOnly,
+                                                    onClick = { edit(relays, toggleBitString(current(relays), r, 19)) },
+                                                    label = { Text(rName) },
+                                                    modifier = Modifier.semantics { contentDescription = "$tzLabel $rName" },
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -754,27 +773,29 @@ fun BoardSettingsScreen(
                                         labelPrefix = "Row $lbl",
                                         onToggle = { d -> edit(days, toggleBitString(current(days), d, 7)) },
                                     )
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Text(
                                             text = "Relays",
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
-                                        listOf(0, 1, 2).forEach { r ->
-                                            val rField = byKey["holdOpenRelay$r"]
-                                            if (rField != null) {
-                                                val on = current(rField).getOrNull(rowIndex) == '1'
-                                                FilterChip(
-                                                    selected = on,
-                                                    enabled = !readOnly,
-                                                    onClick = { edit(rField, toggleBitString(current(rField), rowIndex, 8)) },
-                                                    label = { Text("R$r") },
-                                                    modifier = Modifier.semantics { contentDescription = "Row $lbl Relay $r" },
-                                                )
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            availableRelays.forEach { r ->
+                                                val rField = byKey["holdOpenRelay$r"]
+                                                if (rField != null) {
+                                                    val on = current(rField).getOrNull(rowIndex) == '1'
+                                                    val rName = relayDisplayName(relayLabels, r)
+                                                    FilterChip(
+                                                        selected = on,
+                                                        enabled = !readOnly,
+                                                        onClick = { edit(rField, toggleBitString(current(rField), rowIndex, 8)) },
+                                                        label = { Text(rName) },
+                                                        modifier = Modifier.semantics { contentDescription = "Row $lbl $rName" },
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -784,7 +805,26 @@ fun BoardSettingsScreen(
                     }
 
                     BoardSection.Apb -> {
-                        items(sectionFields, key = { it.key }) { setting ->
+                        val byKey = sectionFields.associateBy { it.key }
+                        val modeField = byKey["apbMode"]
+                        val apbOn = modeField != null && current(modeField) != "Off"
+                        val resyncAllField = byKey["apbResyncAll"]
+                        val resyncAllOn = resyncAllField != null && current(resyncAllField) == "Yes"
+                        val schedEnabledField = byKey["apbScheduleEnabled"]
+                        val schedDaysField = byKey["apbScheduleDays"]
+                        val schedTimeField = byKey["apbScheduleTime"]
+                        val schedOn = schedEnabledField != null && current(schedEnabledField) == "Yes"
+
+                        val visibleApbFields = sectionFields.filter { setting ->
+                            when (setting.key) {
+                                "apbMode" -> true
+                                "apbScheduleDays", "apbScheduleTime" -> false // rendered inside combined apbScheduleEnabled card
+                                "apbResyncList" -> apbOn && resyncAllOn
+                                else -> apbOn
+                            }
+                        }
+
+                        items(visibleApbFields, key = { it.key }) { setting ->
                             val cur = current(setting)
                             val dirty = setting.key in edits
                             val pending = setting.value != setting.gate
@@ -833,8 +873,9 @@ fun BoardSettingsScreen(
                                     "apbRelaysIn", "apbRelaysOut" -> {
                                         val selectedRelays = cur.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
                                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            listOf(0, 1, 2).forEach { relay ->
+                                            availableRelays.forEach { relay ->
                                                 val on = relay in selectedRelays
+                                                val rName = relayDisplayName(relayLabels, relay)
                                                 FilterChip(
                                                     selected = on,
                                                     enabled = !readOnly && (on || selectedRelays.size < 10),
@@ -842,8 +883,8 @@ fun BoardSettingsScreen(
                                                         val next = if (on) selectedRelays - relay else selectedRelays + relay
                                                         edit(setting, next.sorted().joinToString(","))
                                                     },
-                                                    label = { Text("R$relay") },
-                                                    modifier = Modifier.semantics { contentDescription = "${setting.name} Relay $relay" },
+                                                    label = { Text(rName) },
+                                                    modifier = Modifier.semantics { contentDescription = "${setting.name} $rName" },
                                                 )
                                             }
                                         }
@@ -871,7 +912,28 @@ fun BoardSettingsScreen(
                                             modifier = Modifier.fillMaxWidth(),
                                         )
                                     }
-                                    "apbResyncAll", "apbScheduleEnabled" -> Unit
+                                    "apbResyncAll" -> Unit
+                                    "apbScheduleEnabled" -> {
+                                        if (schedOn) {
+                                            if (schedTimeField != null) {
+                                                TimePickerField(
+                                                    label = "Re-Sync time",
+                                                    value = current(schedTimeField),
+                                                    onValueChange = { edit(schedTimeField, it) },
+                                                    enabled = !readOnly,
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                )
+                                            }
+                                            if (schedDaysField != null) {
+                                                WeekdayToggleRow(
+                                                    bits = current(schedDaysField),
+                                                    enabled = !readOnly,
+                                                    labelPrefix = "Re-Sync",
+                                                    onToggle = { d -> edit(schedDaysField, toggleBitString(current(schedDaysField), d, 7)) },
+                                                )
+                                            }
+                                        }
+                                    }
                                     "apbResyncList" -> {
                                         OutlinedTextField(
                                             value = cur,
@@ -880,23 +942,6 @@ fun BoardSettingsScreen(
                                             singleLine = true,
                                             enabled = !readOnly,
                                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
-                                            modifier = Modifier.fillMaxWidth(),
-                                        )
-                                    }
-                                    "apbScheduleDays" -> {
-                                        WeekdayToggleRow(
-                                            bits = cur,
-                                            enabled = !readOnly,
-                                            labelPrefix = "Re-Sync",
-                                            onToggle = { d -> edit(setting, toggleBitString(cur, d, 7)) },
-                                        )
-                                    }
-                                    "apbScheduleTime" -> {
-                                        TimePickerField(
-                                            label = "Re-Sync time",
-                                            value = cur,
-                                            onValueChange = { edit(setting, it) },
-                                            enabled = !readOnly,
                                             modifier = Modifier.fillMaxWidth(),
                                         )
                                     }

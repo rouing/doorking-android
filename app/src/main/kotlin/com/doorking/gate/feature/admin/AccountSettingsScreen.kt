@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.MarkEmailRead
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -78,6 +79,8 @@ import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import com.doorking.gate.core.ui.components.ThemeModeSelector
 import com.doorking.gate.feature.auth.validateNewPassword
+import com.doorking.gate.widget.GateWidgetUpdater
+import com.doorking.gate.widget.RelayWidgetPinHelper
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
@@ -378,6 +381,111 @@ fun AccountSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     ThemeModeSelector(mode = themeMode, onSelect = onSelectTheme)
+                }
+            }
+
+            val portalRelayGroups = profile?.portalRelays.orEmpty()
+            if (portalRelayGroups.isNotEmpty()) {
+                item(key = "portal_relays") {
+                    val canPinWidget = remember(context) { RelayWidgetPinHelper.canPin(context) }
+                    SectionCard(title = "Visible gate relays", tonal = true) {
+                        Text(
+                            text = "Choose which gate open buttons appear in the app and Android Auto. Pin any relay as a 1×1 home-screen shortcut.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        portalRelayGroups.forEach { group ->
+                            if (portalRelayGroups.size > 1) {
+                                Text(
+                                    text = group.siteName.ifBlank { group.phone },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            group.relays.forEach { opt ->
+                                val visible = !opt.hidden
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = opt.name.ifBlank { "Relay ${opt.relay}" },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (canPinWidget) {
+                                        IconButton(
+                                            onClick = {
+                                                val unitCode = profile?.linkedUnits
+                                                    ?.firstOrNull { it.gatePhone == group.phone }
+                                                    ?.directoryCode
+                                                val ok = RelayWidgetPinHelper.requestPin(
+                                                    context = context,
+                                                    gatePhone = group.phone,
+                                                    gateName = group.siteName.ifBlank { group.phone },
+                                                    relay = opt.relay,
+                                                    relayName = opt.name.ifBlank { "Relay ${opt.relay}" },
+                                                    unitCode = unitCode,
+                                                )
+                                                if (!ok) onMessage("Add the 1×1 Relay widget from your home screen widget picker.")
+                                            },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.PushPin,
+                                                contentDescription = "Pin ${opt.name.ifBlank { "Relay ${opt.relay}" }} 1×1 widget",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
+                                    }
+                                    Switch(
+                                        checked = visible,
+                                        onCheckedChange = { wantVisible ->
+                                            val currentHidden = profile?.hiddenRelays.orEmpty().toMutableMap()
+                                            val gateHidden = currentHidden[group.phone].orEmpty().toMutableSet()
+                                            if (wantVisible) gateHidden.remove(opt.relay) else gateHidden.add(opt.relay)
+                                            if (gateHidden.isEmpty()) currentHidden.remove(group.phone)
+                                            else currentHidden[group.phone] = gateHidden.sorted()
+                                            val nextGroups = portalRelayGroups.map { g ->
+                                                if (g.phone != group.phone) g
+                                                else g.copy(relays = g.relays.map { r -> if (r.relay == opt.relay) r.copy(hidden = !wantVisible) else r })
+                                            }
+                                            profile = profile?.copy(hiddenRelays = currentHidden, portalRelays = nextGroups)
+                                            scope.launch {
+                                                val body = buildJsonObject {
+                                                    put(
+                                                        "hiddenRelays",
+                                                        buildJsonObject {
+                                                            currentHidden.forEach { (phoneKey, list) ->
+                                                                put(
+                                                                    phoneKey,
+                                                                    kotlinx.serialization.json.JsonArray(list.map { JsonPrimitive(it) }),
+                                                                )
+                                                            }
+                                                        },
+                                                    )
+                                                }
+                                                runCatching {
+                                                    val res = api.updateMe(body)
+                                                    if (!res.isSuccessful) error(parseApiError(res.errorBody()?.string(), res.code(), "Could not save relay visibility"))
+                                                }
+                                                    .onSuccess {
+                                                        onProfileUpdated?.invoke()
+                                                        GateWidgetUpdater.enqueueSync(context)
+                                                    }
+                                                    .onFailure { err ->
+                                                        error = err.message ?: "Could not save relay visibility"
+                                                        load(initial = false)
+                                                    }
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

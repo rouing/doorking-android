@@ -254,6 +254,49 @@ fun HistoryScreen(
                 }
             }
 
+            if (pulls.isNotEmpty()) {
+                item(key = "pulls") {
+                    CollapsibleSectionCard(
+                        title = "Past pulls (${pulls.size})",
+                        expanded = pullsExpanded,
+                        tonal = true,
+                        onToggle = { pullsExpanded = !pullsExpanded },
+                    ) {
+                        pulls.forEach { pull ->
+                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    StatusPill(pull.pulledAt.take(16).replace('T', ' '), tone = PillTone.Neutral)
+                                    StatusPill(pull.actor, tone = PillTone.Neutral)
+                                    StatusPill("${pull.residentsCount} entries", tone = PillTone.Primary)
+                                    StatusPill("${pull.cardsCount} cards", tone = PillTone.Neutral)
+                                }
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(
+                                        modifier = Modifier.weight(1f),
+                                        onClick = {
+                                            scope.launch {
+                                                runCatching { api.diffPullArchive(gatePhone, pull.id) }
+                                                    .onSuccess { diffView = it }
+                                                    .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
+                                            }
+                                        },
+                                    ) { Text("Compare") }
+                                    if (!readOnly) {
+                                        Button(
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { restoreTarget = pull },
+                                        ) { Text("Restore") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (visibleEvents.isEmpty()) {
                 item(key = "events-empty") {
                     BubbleCard {
@@ -344,49 +387,6 @@ fun HistoryScreen(
                 ) { Text("Show more (${shown} of ${events.size})") }
             }
         }
-
-            if (pulls.isNotEmpty()) {
-                item(key = "pulls") {
-                    CollapsibleSectionCard(
-                        title = "Past pulls (${pulls.size})",
-                        expanded = pullsExpanded,
-                        tonal = true,
-                        onToggle = { pullsExpanded = !pullsExpanded },
-                    ) {
-                        pulls.forEach { pull ->
-                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    StatusPill(pull.pulledAt.take(16).replace('T', ' '), tone = PillTone.Neutral)
-                                    StatusPill(pull.actor, tone = PillTone.Neutral)
-                                    StatusPill("${pull.residentsCount} entries", tone = PillTone.Primary)
-                                    StatusPill("${pull.cardsCount} cards", tone = PillTone.Neutral)
-                                }
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(
-                                        modifier = Modifier.weight(1f),
-                                        onClick = {
-                                            scope.launch {
-                                                runCatching { api.diffPullArchive(gatePhone, pull.id) }
-                                                    .onSuccess { diffView = it }
-                                                    .onFailure { error = ApiClientFactory.parseErrorMessage(it) }
-                                            }
-                                        },
-                                    ) { Text("Compare") }
-                                    if (!readOnly) {
-                                        Button(
-                                            modifier = Modifier.weight(1f),
-                                            onClick = { restoreTarget = pull },
-                                        ) { Text("Restore") }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

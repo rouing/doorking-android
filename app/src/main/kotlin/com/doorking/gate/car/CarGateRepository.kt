@@ -16,6 +16,8 @@ data class CarRelayTile(
     val statusText: String,
     val canBuzz: Boolean,
     val requirePasskey: Boolean,
+    val isBusy: Boolean = false,
+    val cooldownSeconds: Int = 0,
 )
 
 sealed interface CarGateUiState {
@@ -87,14 +89,16 @@ object CarGateRepository {
             val gateName = portalMe.gate.siteName.ifBlank { phone }
             gateNames.add(gateName)
             val status = runCatching { api.getPortalStatus(phone) }.getOrNull()
+            val isBusy = status != null && !status.available
+            val cooldownSec = status?.cooldownSeconds ?: 0
             val (statusText, canBuzz) = when {
                 portalMe.portal.requirePasskeyForBuzz -> "Passkey on phone" to false
-                status != null && !status.available -> {
-                    val pct = status.percent?.let { " $it%" } ?: ""
+                isBusy -> {
+                    val pct = status?.percent?.let { " $it%" } ?: ""
                     "Busy$pct" to false
                 }
-                status != null && status.cooldownSeconds > 0 -> {
-                    "Wait ${status.cooldownSeconds}s" to false
+                cooldownSec > 0 -> {
+                    "Wait ${cooldownSec}s" to false
                 }
                 else -> "Tap to open" to true
             }
@@ -111,6 +115,8 @@ object CarGateRepository {
                         statusText = statusText,
                         canBuzz = canBuzz,
                         requirePasskey = portalMe.portal.requirePasskeyForBuzz,
+                        isBusy = isBusy,
+                        cooldownSeconds = cooldownSec,
                     ),
                 )
             }

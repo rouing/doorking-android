@@ -19,29 +19,39 @@ import com.doorking.gate.DoorkingApp
 import com.doorking.gate.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Primary Android Auto screen showing one-tap resident gate tiles (`GridTemplate`).
- * Uses Car API 6–compatible template builders (`setTitle`, `setHeaderAction`, `ActionStrip`) so it
- * runs cleanly on every IoT-capable Android Auto head unit.
+ * Primary Android Auto screen showing one-tap gate relay tiles (`GridTemplate`) with lock icons
+ * and automatic live status/cooldown polling while visible.
  */
 class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var uiState: CarGateUiState = CarGateUiState.Loading
+    private var pollJob: Job? = null
 
     init {
         lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
                     refresh()
+                    startPolling()
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    pollJob?.cancel()
+                    pollJob = null
                 }
 
                 override fun onDestroy(owner: LifecycleOwner) {
+                    pollJob?.cancel()
                     scope.cancel()
                 }
             },
@@ -61,7 +71,7 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             )
                 .setTitle("Doorking Gate")
                 .setHeaderAction(Action.APP_ICON)
-                .setIcon(gateCarIcon(CarColor.PRIMARY))
+                .setIcon(relayLockIcon(CarColor.PRIMARY))
                 .addAction(
                     Action.Builder()
                         .setTitle("Check again")
@@ -73,7 +83,7 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             is CarGateUiState.NoBuzzableGates -> MessageTemplate.Builder(state.reason)
                 .setTitle("Doorking Gate")
                 .setHeaderAction(Action.APP_ICON)
-                .setIcon(gateCarIcon(CarColor.DEFAULT))
+                .setIcon(relayLockIcon(CarColor.DEFAULT))
                 .addAction(
                     Action.Builder()
                         .setTitle("Refresh")
@@ -85,7 +95,7 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             is CarGateUiState.Error -> MessageTemplate.Builder(state.message)
                 .setTitle("Doorking Gate")
                 .setHeaderAction(Action.APP_ICON)
-                .setIcon(gateCarIcon(CarColor.RED))
+                .setIcon(relayLockIcon(CarColor.RED))
                 .addAction(
                     Action.Builder()
                         .setTitle("Retry")
@@ -111,11 +121,11 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
                     } else {
                         val tint = when {
                             tile.canBuzz -> CarColor.PRIMARY
-                            tile.requirePasskey -> CarColor.YELLOW
+                            tile.requirePasskey || tile.isBusy -> CarColor.YELLOW
                             else -> CarColor.DEFAULT
                         }
                         itemBuilder
-                            .setImage(gateCarIcon(tint), GridItem.IMAGE_TYPE_ICON)
+                            .setImage(relayLockIcon(tint), GridItem.IMAGE_TYPE_ICON)
                             .setOnClickListener { onRelayTapped(tile) }
                     }
                     listBuilder.addItem(itemBuilder.build())
@@ -141,9 +151,27 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
         }
     }
 
-    private fun gateCarIcon(tint: CarColor): CarIcon {
-        val icon = IconCompat.createWithResource(carContext, R.drawable.ic_widget_gate)
+    private fun relayLockIcon(tint: CarColor): CarIcon {
+        val icon = IconCompat.createWithResource(carContext, R.drawable.ic_widget_lock)
         return CarIcon.Builder(icon).setTint(tint).build()
+    }
+
+    private fun startPolling() {
+        pollJob?.cancel()
+        pollJob = scope.launch {
+            while (isActive) {
+                val cur = uiState
+                val fast = cur is CarGateUiState.Ready && (
+                    cur.buzzingKey != null ||
+                        cur.relays.any { it.isBusy || it.cooldownSeconds > 0 }
+                    )
+                delay(if (fast) FAST_POLL_MS else IDLE_POLL_MS)
+                val latest = uiState
+                // Skip overwriting an in-flight buzz spinner while the HTTP call is active.
+                if (latest is CarGateUiState.Ready && latest.buzzingKey != null) continue
+                fetchAndApply(silent = true)
+            }
+        }
     }
 
     private fun refresh() {
@@ -157,13 +185,19 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             uiState = CarGateUiState.Loading
             invalidate()
         }
-        scope.launch {
-            val next = withContext(Dispatchers.IO) {
-                CarGateRepository.fetchState(
-                    sessionStorage = app.container.sessionStorage,
-                    api = app.container.api,
-                )
-            }
+        scope.launch { fetchAndApply(silent = false) }
+    }
+
+    private suspend fun fetchAndApply(silent: Boolean) {
+        val app = carContext.applicationContext as? DoorkingApp ?: return
+        if (app.startupCrash != null) return
+        val next = withContext(Dispatchers.IO) {
+            CarGateRepository.fetchState(
+                sessionStorage = app.container.sessionStorage,
+                api = app.container.api,
+            )
+        }
+        if (!silent || next != uiState) {
             uiState = next
             invalidate()
         }
@@ -213,6 +247,13 @@ class ResidentGateCarScreen(carContext: CarContext) : Screen(carContext) {
             }
             uiState = refreshed
             invalidate()
+            // Restart polling immediately on the 2s cadence so cooldown/busy updates smoothly.
+            startPolling()
         }
+    }
+
+    private companion object {
+        const val FAST_POLL_MS = 2_000L
+        const val IDLE_POLL_MS = 10_000L
     }
 }
