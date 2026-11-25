@@ -1,0 +1,7 @@
+• Android 16+ AppFunctions for Gemini voice gate control
+• Quick Settings pull-down tiles (1 per visible gate relay)
+• Multi-relay resizable Quick Gate widget + 1×1 per-relay shortcuts
+• Hardware Keystore fingerprint step-up & immediate fingerprint app unlock
+• Push-notification passkey approval with 2-digit number match
+• Live auto-updating Android Auto tiles with lock icons
+• Camera channel-to-relay mapping & long-lived mobile sessions
