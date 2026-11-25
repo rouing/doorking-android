@@ -2,16 +2,24 @@ package com.doorking.gate.feature.admin
 
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.AuthEventBus
+import com.doorking.gate.core.network.CameraChannelDto
+import com.doorking.gate.core.network.CameraSettingsDto
 import com.doorking.gate.core.network.ConflictDecisionRequest
 import com.doorking.gate.core.network.ConfirmRequest
 import com.doorking.gate.core.network.GateSettingRowDto
 import com.doorking.gate.core.ui.components.formatTime12Hour
 import com.doorking.gate.fakes.FakeSessionStorage
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -104,5 +112,134 @@ class AdminFeaturesTest {
             GateSettingRowDto("displayLine8", "Display (8 line)", "Instructions line 4", 0, 20, "Press # - Try Again.", "", true),
         )
         assertEquals(DisplayLayoutMode.TwoLine, detectInitialDisplayLayout(twoLineWithFactoryEightLineDefaults))
+    }
+
+    @Test
+    fun buildsCameraSettingsPayloadWithNormalizedFieldsAndOptionalPassword() {
+        val formWithoutPassword = CameraFormState(
+            enabled = true,
+            serial = "  ABC123456  ",
+            username = " admin ",
+            password = "",
+            clockOffset = "-120",
+            mode = "video",
+            frames = 4,
+            framesAfter = 2,
+            clipTries = 3,
+            events = "all",
+            keepDays = 30,
+            backfillHours = "48",
+            channels = listOf(
+                CameraChannelFormRow(channel = "1", name = " Main Entry ", relays = listOf(2, 0, 2)),
+                CameraChannelFormRow(channel = "", name = "Unused", relays = listOf(1)),
+                CameraChannelFormRow(channel = "4", name = "Exit", relays = emptyList()),
+            ),
+        )
+        val payload = buildCameraSettingsPayload(formWithoutPassword)
+        assertTrue(payload["enabled"]!!.jsonPrimitive.boolean)
+        assertEquals("ABC123456", payload["serial"]!!.jsonPrimitive.content)
+        assertEquals("admin", payload["username"]!!.jsonPrimitive.content)
+        assertFalse(payload.containsKey("password"))
+        assertEquals(-120, payload["clockOffset"]!!.jsonPrimitive.int)
+        assertEquals("video", payload["mode"]!!.jsonPrimitive.content)
+        assertEquals(4, payload["frames"]!!.jsonPrimitive.int)
+        assertEquals(2, payload["framesAfter"]!!.jsonPrimitive.int)
+        assertEquals(3, payload["clipTries"]!!.jsonPrimitive.int)
+        assertEquals("all", payload["events"]!!.jsonPrimitive.content)
+        assertEquals(30, payload["keepDays"]!!.jsonPrimitive.int)
+        assertEquals(48, payload["backfillHours"]!!.jsonPrimitive.int)
+
+        val channels = payload["channels"]!!.jsonArray
+        assertEquals(2, channels.size)
+        val ch0 = channels[0].jsonObject
+        assertEquals(1, ch0["channel"]!!.jsonPrimitive.int)
+        assertEquals("Main Entry", ch0["name"]!!.jsonPrimitive.content)
+        assertEquals(listOf(0, 2), ch0["relays"]!!.jsonArray.map { it.jsonPrimitive.int })
+
+        val ch1 = channels[1].jsonObject
+        assertEquals(4, ch1["channel"]!!.jsonPrimitive.int)
+        assertEquals("Exit", ch1["name"]!!.jsonPrimitive.content)
+        assertTrue(ch1["relays"]!!.jsonArray.isEmpty())
+
+        val withPassword = buildCameraSettingsPayload(formWithoutPassword.copy(password = "s3cret"))
+        assertEquals("s3cret", withPassword["password"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun confirmsCameraRetentionOnlyWhenShorteningToNonZero() {
+        assertTrue(shouldConfirmCameraRetention(previousKeepDays = 0, nextKeepDays = 30))
+        assertTrue(shouldConfirmCameraRetention(previousKeepDays = 90, nextKeepDays = 15))
+        assertFalse(shouldConfirmCameraRetention(previousKeepDays = 30, nextKeepDays = 30))
+        assertFalse(shouldConfirmCameraRetention(previousKeepDays = 30, nextKeepDays = 60))
+        assertFalse(shouldConfirmCameraRetention(previousKeepDays = 30, nextKeepDays = 0))
+        assertFalse(shouldConfirmCameraRetention(previousKeepDays = 0, nextKeepDays = 0))
+    }
+
+    @Test
+    fun cameraFormStateDefaultsAndRestoresSavedChannels() {
+        val emptyState = cameraFormStateFrom(null)
+        assertEquals(4, emptyState.channels.size)
+        assertTrue(emptyState.channels.all { it.channel.isEmpty() && it.name.isEmpty() })
+
+        val saved = CameraSettingsDto(
+            enabled = false,
+            serial = "SN987654",
+            username = "camadmin",
+            mode = "video",
+            clockOffset = 15,
+            frames = 2,
+            framesAfter = 1,
+            clipTries = 4,
+            events = "all",
+            backfillHours = 72,
+            keepDays = 60,
+            channels = listOf(CameraChannelDto(channel = 2, name = "Rear", relays = listOf(1, 0, 1))),
+        )
+        val restored = cameraFormStateFrom(saved)
+        assertFalse(restored.enabled)
+        assertEquals("SN987654", restored.serial)
+        assertEquals("", restored.password)
+        assertEquals("15", restored.clockOffset)
+        assertEquals("72", restored.backfillHours)
+        assertEquals(1, restored.channels.size)
+        assertEquals("2", restored.channels[0].channel)
+        assertEquals(listOf(0, 1), restored.channels[0].relays)
+    }
+
+    @Test
+    fun cameraTestAndDeleteSnapshotsEndpointsHitExactPaths() = runBlocking {
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val storage = FakeSessionStorage(initialServerUrl = baseUrl, initialToken = "dks_${"7".repeat(64)}")
+        val api = ApiClientFactory.createApi(ApiClientFactory.createOkHttp(storage, AuthEventBus()), "$baseUrl/")
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"channels":[{"channel":1,"name":"Gate","file":"ch1.jpg"},{"channel":2,"name":"Side","error":"Offline"}]}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"files":18,"minutes":6}"""),
+        )
+
+        val testRes = api.testCameras("2145550100")
+        assertTrue(testRes.isSuccessful)
+        assertEquals(2, testRes.body()?.channels?.size)
+        assertEquals("ch1.jpg", testRes.body()?.channels?.get(0)?.file)
+        assertEquals("Offline", testRes.body()?.channels?.get(1)?.error)
+        val testReq = server.takeRequest()
+        assertEquals("POST", testReq.method)
+        assertEquals("/api/gates/2145550100/cameras/test", testReq.path)
+
+        val delRes = api.deleteAllSnapshots("2145550100")
+        assertTrue(delRes.isSuccessful)
+        assertEquals(18, delRes.body()?.files)
+        assertEquals(6, delRes.body()?.minutes)
+        val delReq = server.takeRequest()
+        assertEquals("DELETE", delReq.method)
+        assertEquals("/api/gates/2145550100/snapshots", delReq.path)
     }
 }

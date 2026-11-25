@@ -28,6 +28,33 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/**
+ * Distinguishes a genuine user dismissal of the Credential Manager sheet from Play Services
+ * configuration or reauth failures that are also surfaced as [GetCredentialCancellationException].
+ */
+internal fun isGenuineUserCancellation(message: String?): Boolean {
+    if (message.isNullOrBlank()) return true
+    val lower = message.lowercase()
+    val nonUserFailureMarkers = listOf(
+        "reauth",
+        "[16]",
+        "16:",
+        "developer",
+        "failed",
+        "error",
+        "matching credential",
+    )
+    if (nonUserFailureMarkers.any { lower.contains(it) }) return false
+    val userCancelMarkers = listOf(
+        "cancelled by the user",
+        "canceled by the user",
+        "user cancelled",
+        "user canceled",
+        "activity is cancelled",
+    )
+    return userCancelMarkers.any { lower.contains(it) }
+}
+
 sealed interface PasskeyResult {
     data class Success(val assertionJson: String) : PasskeyResult
     data object Cancelled : PasskeyResult
@@ -126,8 +153,15 @@ class AndroidPasskeyManager : PasskeyAuthenticator {
             } else {
                 GoogleSignInResult.FallbackToBrowser("Unsupported credential type returned by device.")
             }
-        } catch (_: GetCredentialCancellationException) {
-            GoogleSignInResult.Cancelled
+        } catch (err: GetCredentialCancellationException) {
+            val msg = err.errorMessage?.toString()?.takeIf { it.isNotBlank() } ?: err.message
+            if (isGenuineUserCancellation(msg)) {
+                GoogleSignInResult.Cancelled
+            } else {
+                GoogleSignInResult.FallbackToBrowser(
+                    msg ?: "Google Sign-In could not complete natively.",
+                )
+            }
         } catch (err: NoCredentialException) {
             GoogleSignInResult.FallbackToBrowser(
                 err.errorMessage?.toString() ?: err.message ?: "No Google credential available.",

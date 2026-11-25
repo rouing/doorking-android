@@ -57,4 +57,29 @@ class ApiModelsTest {
         assertEquals("Main Gate", decoded.portal.buzzRelayLabels.first().name)
         assertEquals(1, decoded.reroll.remainingToday)
     }
+
+    @Test
+    fun decodesCameraTestAndDeleteSnapshotsReplies() {
+        val testRaw = """
+            {
+              "channels": [
+                { "channel": 1, "name": "Entry Gate", "file": "ch1.jpg" },
+                { "channel": 2, "name": "Exit Lane", "error": "Recorder timed out" }
+              ]
+            }
+        """.trimIndent()
+        val testReply = json.decodeFromString<CameraTestReply>(testRaw)
+        assertEquals(2, testReply.channels.size)
+        assertEquals(1, testReply.channels[0].channel)
+        assertEquals("Entry Gate", testReply.channels[0].name)
+        assertEquals("ch1.jpg", testReply.channels[0].file)
+        assertEquals(null, testReply.channels[0].error)
+        assertEquals(2, testReply.channels[1].channel)
+        assertEquals(null, testReply.channels[1].file)
+        assertEquals("Recorder timed out", testReply.channels[1].error)
+
+        val deleteReply = json.decodeFromString<DeleteSnapshotsReply>("""{"files":42,"minutes":14}""")
+        assertEquals(42, deleteReply.files)
+        assertEquals(14, deleteReply.minutes)
+    }
 }

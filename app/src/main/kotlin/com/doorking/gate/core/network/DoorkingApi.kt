@@ -235,8 +235,17 @@ interface DoorkingApi {
     @DELETE("api/gates/{phone}/cameras")
     suspend fun deleteCameras(@Path("phone") phone: String): Response<OkResponse>
 
+    @POST("api/gates/{phone}/cameras/test")
+    suspend fun testCameras(
+        @Path("phone") phone: String,
+        @Body body: JsonObject = JsonObject(emptyMap()),
+    ): Response<CameraTestReply>
+
     @GET("api/gates/{phone}/snapshots")
     suspend fun getSnapshots(@Path("phone") phone: String): SnapshotsReply
+
+    @DELETE("api/gates/{phone}/snapshots")
+    suspend fun deleteAllSnapshots(@Path("phone") phone: String): Response<DeleteSnapshotsReply>
 
     @POST("api/gates/{phone}/snapshots/run")
     suspend fun runSnapshots(

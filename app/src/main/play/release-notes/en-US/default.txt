@@ -1,4 +1,4 @@
-• Native Sign in with Google bottom-sheet account picker (with Google Workspace support) & smoother SSO fallback
-• Guided post-invite Passkey & Fingerprint lock quick setup
-• Faster 1-tap gate widgets with live widget picker previews
-• Opt-in crash reports, in-app Privacy Policy, and startup & battery improvements
+• Full Dahua P2P Camera settings & live camera test inside System Settings (with channel-to-relay mapping)
+• Back button now returns to the last page visited across Staff and Resident views
+• Native Google Sign-In popup with seamless Custom Tabs fallback
+• Cleaner Gate sheet with a compact "Running" status pill and draft Save/Discard buttons shown only when edits exist

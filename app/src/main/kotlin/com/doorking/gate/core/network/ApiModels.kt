@@ -572,6 +572,25 @@ data class CameraSettingsReply(
 )
 
 @Serializable
+data class CameraTestChannelDto(
+    val channel: Int,
+    val name: String = "",
+    val file: String? = null,
+    val error: String? = null,
+)
+
+@Serializable
+data class CameraTestReply(
+    val channels: List<CameraTestChannelDto> = emptyList(),
+)
+
+@Serializable
+data class DeleteSnapshotsReply(
+    val files: Int = 0,
+    val minutes: Int = 0,
+)
+
+@Serializable
 data class SnapshotMinuteDto(
     val status: String = "",
     val files: List<String> = emptyList(),

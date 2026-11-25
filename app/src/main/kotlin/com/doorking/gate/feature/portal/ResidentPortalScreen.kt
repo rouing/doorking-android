@@ -3,6 +3,7 @@ package com.doorking.gate.feature.portal
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -78,6 +79,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -134,10 +136,30 @@ fun ResidentPortalScreen(
     )
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(PortalTab.Gate) }
+    val tabHistory = remember { mutableStateListOf<PortalTab>() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+
+    fun selectTab(next: PortalTab) {
+        if (next == tab) return
+        if (tabHistory.lastOrNull() != tab) {
+            tabHistory.add(tab)
+            if (tabHistory.size > 15) {
+                tabHistory.removeAt(0)
+            }
+        }
+        tab = next
+    }
+
+    BackHandler(enabled = tabHistory.isNotEmpty() || onSwitchToStaff != null) {
+        if (tabHistory.isNotEmpty()) {
+            tab = tabHistory.removeAt(tabHistory.lastIndex)
+        } else {
+            onSwitchToStaff?.invoke()
+        }
+    }
 
     val pollGateStatus = tab == PortalTab.Gate
     LifecycleStartEffect(vm, pollGateStatus) {
@@ -187,25 +209,25 @@ fun ResidentPortalScreen(
             NavigationBar {
                 NavigationBarItem(
                     selected = tab == PortalTab.Gate,
-                    onClick = { tab = PortalTab.Gate },
+                    onClick = { selectTab(PortalTab.Gate) },
                     icon = { Icon(if (tab == PortalTab.Gate) Icons.Rounded.Fence else Icons.Outlined.Fence, contentDescription = null) },
                     label = { Text(PortalTab.Gate.label) },
                 )
                 NavigationBarItem(
                     selected = tab == PortalTab.Activity,
-                    onClick = { tab = PortalTab.Activity },
+                    onClick = { selectTab(PortalTab.Activity) },
                     icon = { Icon(if (tab == PortalTab.Activity) Icons.Rounded.History else Icons.Outlined.History, contentDescription = null) },
                     label = { Text(PortalTab.Activity.label) },
                 )
                 NavigationBarItem(
                     selected = tab == PortalTab.Requests,
-                    onClick = { tab = PortalTab.Requests },
+                    onClick = { selectTab(PortalTab.Requests) },
                     icon = { Icon(if (tab == PortalTab.Requests) Icons.AutoMirrored.Rounded.Assignment else Icons.AutoMirrored.Outlined.Assignment, contentDescription = null) },
                     label = { Text(PortalTab.Requests.label) },
                 )
                 NavigationBarItem(
                     selected = tab == PortalTab.Account,
-                    onClick = { tab = PortalTab.Account },
+                    onClick = { selectTab(PortalTab.Account) },
                     icon = { Icon(if (tab == PortalTab.Account) Icons.Rounded.Person else Icons.Outlined.Person, contentDescription = null) },
                     label = { Text(PortalTab.Account.label) },
                 )

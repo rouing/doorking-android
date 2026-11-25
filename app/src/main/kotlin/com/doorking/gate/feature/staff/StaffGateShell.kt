@@ -65,6 +65,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -137,6 +138,7 @@ fun StaffGateShell(
     val state by vm.uiState.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(StaffTab.Residents) }
     var subScreen by remember { mutableStateOf<MoreSubScreen?>(null) }
+    val navHistory = remember { mutableStateListOf<Pair<StaffTab, MoreSubScreen?>>() }
     var draftActions by remember { mutableStateOf<SettingsDraftActions?>(null) }
     var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showGateSheet by remember { mutableStateOf(false) }
@@ -171,8 +173,39 @@ fun StaffGateShell(
         }
     }
 
-    BackHandler(enabled = subScreen != null) {
-        navigateGuarded { subScreen = null }
+    fun navigateTo(nextTab: StaffTab, nextSub: MoreSubScreen? = null) {
+        if (nextTab == tab && nextSub == subScreen) return
+        navigateGuarded {
+            val current = tab to subScreen
+            if (navHistory.lastOrNull() != current) {
+                navHistory.add(current)
+                if (navHistory.size > 25) {
+                    navHistory.removeAt(0)
+                }
+            }
+            tab = nextTab
+            subScreen = nextSub
+        }
+    }
+
+    fun goBack() {
+        if (navHistory.isNotEmpty()) {
+            navigateGuarded {
+                if (navHistory.isNotEmpty()) {
+                    val (prevTab, prevSub) = navHistory.removeAt(navHistory.lastIndex)
+                    tab = prevTab
+                    subScreen = prevSub
+                }
+            }
+        } else if (subScreen != null) {
+            navigateGuarded {
+                subScreen = null
+            }
+        }
+    }
+
+    BackHandler(enabled = navHistory.isNotEmpty() || subScreen != null) {
+        goBack()
     }
 
     if (pendingNavigation != null) {
@@ -399,7 +432,7 @@ fun StaffGateShell(
                 },
                 navigationIcon = {
                     if (subScreen != null) {
-                        IconButton(onClick = { navigateGuarded { subScreen = null } }) {
+                        IconButton(onClick = { goBack() }) {
                             Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
                         }
                     }
@@ -476,21 +509,21 @@ fun StaffGateShell(
                 val resSel = subScreen == null && tab == StaffTab.Residents
                 NavigationBarItem(
                     selected = resSel,
-                    onClick = { navigateGuarded { subScreen = null; tab = StaffTab.Residents } },
+                    onClick = { navigateTo(StaffTab.Residents) },
                     icon = { Icon(if (resSel) Icons.Rounded.People else Icons.Outlined.People, contentDescription = null) },
                     label = { Text("Residents") },
                 )
                 val venSel = subScreen == null && tab == StaffTab.Vendors
                 NavigationBarItem(
                     selected = venSel,
-                    onClick = { navigateGuarded { subScreen = null; tab = StaffTab.Vendors } },
+                    onClick = { navigateTo(StaffTab.Vendors) },
                     icon = { Icon(if (venSel) Icons.Rounded.Work else Icons.Outlined.WorkOutline, contentDescription = null) },
                     label = { Text("Vendors") },
                 )
                 val txSel = subScreen == null && tab == StaffTab.Transactions
                 NavigationBarItem(
                     selected = txSel,
-                    onClick = { navigateGuarded { subScreen = null; tab = StaffTab.Transactions } },
+                    onClick = { navigateTo(StaffTab.Transactions) },
                     icon = { Icon(if (txSel) Icons.AutoMirrored.Rounded.ListAlt else Icons.AutoMirrored.Outlined.ListAlt, contentDescription = null) },
                     label = { Text("Activity") },
                 )
@@ -517,7 +550,7 @@ fun StaffGateShell(
                 val moreSel = subScreen != null || tab == StaffTab.More
                 NavigationBarItem(
                     selected = moreSel,
-                    onClick = { navigateGuarded { subScreen = null; tab = StaffTab.More } },
+                    onClick = { navigateTo(StaffTab.More) },
                     icon = { Icon(if (moreSel) Icons.Rounded.MoreHoriz else Icons.Outlined.MoreHoriz, contentDescription = null) },
                     label = { Text("More") },
                 )
@@ -642,7 +675,7 @@ fun StaffGateShell(
                 StaffTab.More -> {
                     StaffMoreTab(
                         session = session,
-                        onNavigate = { subScreen = it },
+                        onNavigate = { target -> navigateTo(StaffTab.More, target) },
                         onOpenLiveRelays = {
                             showRelaysSheet = true
                             vm.refreshRelays()

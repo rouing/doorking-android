@@ -360,22 +360,25 @@ fun SignInScreen(
                                 error = null
                                 onClearExternalError()
                                 scope.launch {
-                                    if (!provider.googleClientId.isNullOrBlank()) {
-                                        onSignInGoogleNative(serverUrl, provider.id, context)
-                                            .onSuccess { outcome ->
-                                                when (outcome) {
-                                                    is GoogleSsoOutcome.SignedIn -> Unit
-                                                    GoogleSsoOutcome.Cancelled -> Unit
-                                                    GoogleSsoOutcome.FallbackToBrowser -> launchBrowserSso(provider)
+                                    try {
+                                        if (!provider.googleClientId.isNullOrBlank()) {
+                                            onSignInGoogleNative(serverUrl, provider.id, context)
+                                                .onSuccess { outcome ->
+                                                    when (outcome) {
+                                                        is GoogleSsoOutcome.SignedIn -> Unit
+                                                        GoogleSsoOutcome.Cancelled -> Unit
+                                                        GoogleSsoOutcome.FallbackToBrowser -> launchBrowserSso(provider)
+                                                    }
                                                 }
-                                            }
-                                            .onFailure { err ->
-                                                error = err.message ?: "Google sign-in failed"
-                                            }
-                                    } else {
-                                        launchBrowserSso(provider)
+                                                .onFailure { err ->
+                                                    error = err.message ?: "Google sign-in failed"
+                                                }
+                                        } else {
+                                            launchBrowserSso(provider)
+                                        }
+                                    } finally {
+                                        busy = false
                                     }
-                                    busy = false
                                 }
                             },
                         ) {

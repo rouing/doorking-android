@@ -4,6 +4,7 @@ import com.doorking.gate.CrashStore
 import com.doorking.gate.core.auth.PasskeyAuthenticator
 import com.doorking.gate.core.auth.PasskeyResult
 import com.doorking.gate.core.auth.UiStepUpCoordinator
+import com.doorking.gate.core.auth.isGenuineUserCancellation
 import com.doorking.gate.core.network.ApiErrorResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
@@ -106,5 +107,25 @@ class SignInAndStepUpTest {
         assertTrue(scrubbed.contains("[REDACTED_EMAIL]"))
         assertTrue(scrubbed.contains("[REDACTED_PHONE]"))
         assertTrue(scrubbed.contains("MainActivity.kt:123"))
+    }
+
+    @Test
+    fun distinguishesGenuineGoogleSignInCancellationFromPlayServicesFailures() {
+        assertTrue(isGenuineUserCancellation(null))
+        assertTrue(isGenuineUserCancellation(""))
+        assertTrue(isGenuineUserCancellation("   "))
+        assertTrue(isGenuineUserCancellation("Request was cancelled by the user"))
+        assertTrue(isGenuineUserCancellation("Canceled by the user."))
+        assertTrue(isGenuineUserCancellation("User cancelled the sign-in flow"))
+        assertTrue(isGenuineUserCancellation("User canceled"))
+        assertTrue(isGenuineUserCancellation("Activity is cancelled by the user."))
+
+        assertFalse(isGenuineUserCancellation("[16] Account reauth failed."))
+        assertFalse(isGenuineUserCancellation("16: Account reauth failed."))
+        assertFalse(isGenuineUserCancellation("Cannot find a matching credential"))
+        assertFalse(isGenuineUserCancellation("Developer console is not set up correctly"))
+        assertFalse(isGenuineUserCancellation("Play Services internal error"))
+        assertFalse(isGenuineUserCancellation("User cancelled because reauth failed"))
+        assertFalse(isGenuineUserCancellation("Unexpected interruption"))
     }
 }

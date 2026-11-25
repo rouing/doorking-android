@@ -119,7 +119,7 @@ fun GateControlSheetContent(
             if (ch.isLowerCase()) ch.titlecase() else ch.toString()
         }
         when (j.state) {
-            "running" -> "$whatName running…" to PillTone.Primary
+            "running" -> "Running" to PillTone.Primary
             "done" -> "$whatName done" to PillTone.Success
             "failed" -> "$whatName failed" to PillTone.Error
             else -> "$whatName ${j.state}" to PillTone.Neutral
@@ -158,7 +158,7 @@ fun GateControlSheetContent(
             )
         }
 
-        if (!readOnly && draftActions != null) {
+        if (!readOnly && draftActions != null && draftActions.unsavedCount > 0) {
             Button(
                 onClick = { draftActions.save(); onClose() },
                 enabled = draftActions.unsavedCount > 0,

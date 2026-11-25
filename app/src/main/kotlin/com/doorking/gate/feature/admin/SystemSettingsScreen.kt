@@ -3,31 +3,40 @@ package com.doorking.gate.feature.admin
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,13 +46,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -51,8 +60,8 @@ import androidx.compose.ui.unit.dp
 import com.doorking.gate.core.network.ApiClientFactory
 import com.doorking.gate.core.network.ApiErrorResponse
 import com.doorking.gate.core.network.ApiKeyInfoDto
-import com.doorking.gate.core.network.CameraChannelDto
 import com.doorking.gate.core.network.CameraSettingsDto
+import com.doorking.gate.core.network.CameraTestChannelDto
 import com.doorking.gate.core.network.CreateApiKeyRequest
 import com.doorking.gate.core.network.CreateWebhookRequest
 import com.doorking.gate.core.network.DeviceRangeDto
@@ -73,15 +82,125 @@ import com.doorking.gate.core.ui.components.ErrorBanner
 import com.doorking.gate.core.ui.components.FullScreenLoading
 import com.doorking.gate.core.ui.components.PasswordOutlinedField
 import com.doorking.gate.core.ui.components.PillTone
-import com.doorking.gate.core.ui.components.SectionCard
 import com.doorking.gate.core.ui.components.StatusPill
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+
+private val NO_SEGMENT_BORDER = BorderStroke(0.dp, Color.Transparent)
+private val CAMERA_MODE_OPTIONS = listOf("snapshots" to "Snapshots", "video" to "Video")
+private val CAMERA_FRAME_OPTIONS = listOf(1, 2, 3, 4, 6)
+private val CAMERA_FRAMES_AFTER_OPTIONS = listOf(0, 1, 2, 3, 4, 6)
+private val CAMERA_CLIP_TRIES_OPTIONS = listOf(1, 2, 3, 4, 5)
+private val CAMERA_EVENT_OPTIONS = listOf("access" to "Access events", "all" to "All events")
+private val CAMERA_KEEP_DAYS_OPTIONS = listOf(0 to "Forever", 15 to "15d", 30 to "30d", 60 to "60d", 90 to "90d")
+private const val MAX_CAMERA_CHANNELS = 8
+private const val DEFAULT_CAMERA_CHANNEL_ROWS = 4
+
+internal data class CameraChannelFormRow(
+    val channel: String = "",
+    val name: String = "",
+    val relays: List<Int> = emptyList(),
+)
+
+internal data class CameraFormState(
+    val enabled: Boolean = true,
+    val serial: String = "",
+    val username: String = "",
+    val password: String = "",
+    val clockOffset: String = "0",
+    val mode: String = "snapshots",
+    val frames: Int = 3,
+    val framesAfter: Int = 0,
+    val clipTries: Int = 2,
+    val events: String = "access",
+    val keepDays: Int = 0,
+    val backfillHours: String = "24",
+    val channels: List<CameraChannelFormRow> = defaultCameraChannelRows(null),
+)
+
+internal fun defaultCameraChannelRows(saved: CameraSettingsDto?): List<CameraChannelFormRow> {
+    val existing = saved?.channels.orEmpty()
+    if (existing.isNotEmpty()) {
+        return existing.take(MAX_CAMERA_CHANNELS).map { ch ->
+            CameraChannelFormRow(
+                channel = ch.channel.toString(),
+                name = ch.name,
+                relays = ch.relays.distinct().sorted(),
+            )
+        }
+    }
+    return List(DEFAULT_CAMERA_CHANNEL_ROWS) { CameraChannelFormRow() }
+}
+
+internal fun cameraFormStateFrom(saved: CameraSettingsDto?): CameraFormState =
+    if (saved == null) {
+        CameraFormState()
+    } else {
+        CameraFormState(
+            enabled = saved.enabled,
+            serial = saved.serial,
+            username = saved.username,
+            password = "",
+            clockOffset = saved.clockOffset.toString(),
+            mode = if (saved.mode == "video") "video" else "snapshots",
+            frames = saved.frames,
+            framesAfter = saved.framesAfter,
+            clipTries = saved.clipTries,
+            events = if (saved.events == "all") "all" else "access",
+            keepDays = saved.keepDays,
+            backfillHours = saved.backfillHours.toString(),
+            channels = defaultCameraChannelRows(saved),
+        )
+    }
+
+internal fun shouldConfirmCameraRetention(previousKeepDays: Int, nextKeepDays: Int): Boolean =
+    nextKeepDays > 0 && (previousKeepDays == 0 || nextKeepDays < previousKeepDays)
+
+internal fun buildCameraSettingsPayload(form: CameraFormState): JsonObject {
+    val channelsJson = JsonArray(
+        form.channels.mapNotNull { row ->
+            val trimmedChannel = row.channel.trim()
+            if (trimmedChannel.isEmpty()) return@mapNotNull null
+            buildJsonObject {
+                val parsed = trimmedChannel.toIntOrNull()
+                if (parsed != null) {
+                    put("channel", JsonPrimitive(parsed))
+                } else {
+                    put("channel", JsonPrimitive(trimmedChannel))
+                }
+                put("name", JsonPrimitive(row.name.trim().take(40)))
+                put("relays", JsonArray(row.relays.distinct().sorted().map { JsonPrimitive(it) }))
+            }
+        },
+    )
+    val clockTrimmed = form.clockOffset.trim()
+    val backfillTrimmed = form.backfillHours.trim()
+    return buildJsonObject {
+        put("enabled", JsonPrimitive(form.enabled))
+        put("serial", JsonPrimitive(form.serial.trim()))
+        put("username", JsonPrimitive(form.username.trim()))
+        if (form.password.isNotEmpty()) {
+            put("password", JsonPrimitive(form.password))
+        }
+        val clockInt = if (clockTrimmed.isEmpty()) 0 else clockTrimmed.toIntOrNull()
+        if (clockInt != null) put("clockOffset", JsonPrimitive(clockInt)) else put("clockOffset", JsonPrimitive(clockTrimmed))
+        put("mode", JsonPrimitive(form.mode))
+        put("frames", JsonPrimitive(form.frames))
+        put("framesAfter", JsonPrimitive(form.framesAfter))
+        put("clipTries", JsonPrimitive(form.clipTries))
+        put("events", JsonPrimitive(form.events))
+        val backfillInt = if (backfillTrimmed.isEmpty()) 24 else backfillTrimmed.toIntOrNull()
+        if (backfillInt != null) put("backfillHours", JsonPrimitive(backfillInt)) else put("backfillHours", JsonPrimitive(backfillTrimmed))
+        put("keepDays", JsonPrimitive(form.keepDays))
+        put("channels", channelsJson)
+    }
+}
 
 private suspend inline fun <T> safeSystemCall(block: () -> T): T? =
     try {
@@ -114,7 +233,16 @@ fun SystemSettingsScreen(
     var requests by remember { mutableStateOf<List<ResidentRequestDto>>(emptyList()) }
     var prefs by remember { mutableStateOf(GatePrefsDto()) }
     var cameras by remember { mutableStateOf<CameraSettingsDto?>(null) }
-    val cameraChannels = remember { mutableStateListOf<CameraChannelDto>() }
+    var cameraForm by remember { mutableStateOf(CameraFormState()) }
+    var cameraSaving by remember { mutableStateOf(false) }
+    var cameraTesting by remember { mutableStateOf(false) }
+    var cameraDeleting by remember { mutableStateOf(false) }
+    var cameraStatusMessage by remember { mutableStateOf<String?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
+    var cameraTestResults by remember { mutableStateOf<List<CameraTestChannelDto>?>(null) }
+    var confirmCameraRetention by remember { mutableStateOf(false) }
+    var confirmRemoveCameras by remember { mutableStateOf(false) }
+    var confirmDeleteSnapshots by remember { mutableStateOf(false) }
     var createdKey by remember { mutableStateOf<Pair<String, String>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -193,8 +321,7 @@ fun SystemSettingsScreen(
                     requests = requestsDef.await()
                     val cams = camsDef.await()
                     cameras = cams
-                    cameraChannels.clear()
-                    if (cams != null) cameraChannels.addAll(cams.channels)
+                    cameraForm = cameraFormStateFrom(cams)
                 }
             }
         }
@@ -284,6 +411,130 @@ fun SystemSettingsScreen(
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { deleteWebhookTarget = null }) { Text("Cancel") } },
+        )
+    }
+
+    fun performCameraSave() {
+        cameraError = null
+        cameraStatusMessage = null
+        cameraSaving = true
+        scope.launch {
+            val payload = buildCameraSettingsPayload(cameraForm)
+            runCatching {
+                val res = api.saveCameras(gatePhone, payload)
+                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
+            }
+                .onSuccess {
+                    cameraSaving = false
+                    cameraForm = cameraForm.copy(password = "")
+                    cameraStatusMessage = "Saved. Use Test cameras to verify the login and channels."
+                    onMessage("Camera settings saved.")
+                    load()
+                    onReloadGate()
+                }
+                .onFailure {
+                    cameraSaving = false
+                    cameraError = it.message ?: "Save failed"
+                }
+        }
+    }
+
+    if (confirmCameraRetention) {
+        val keep = cameraForm.keepDays
+        AlertDialog(
+            onDismissRequest = { confirmCameraRetention = false },
+            title = { Text("Keep pictures for $keep days?") },
+            text = { Text("Pictures and videos older than $keep days are deleted now, and each day from then on. This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmCameraRetention = false
+                        performCameraSave()
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { confirmCameraRetention = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmRemoveCameras) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveCameras = false },
+            title = { Text("Remove camera settings?") },
+            text = { Text("Removes the recorder credentials and channel settings for this gate. Saved snapshots are kept.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmRemoveCameras = false
+                        cameraError = null
+                        cameraStatusMessage = null
+                        cameraDeleting = true
+                        scope.launch {
+                            runCatching {
+                                val res = api.deleteCameras(gatePhone)
+                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Remove failed"))
+                            }
+                                .onSuccess {
+                                    cameraDeleting = false
+                                    cameraTestResults = null
+                                    cameraStatusMessage = "Camera settings removed."
+                                    onMessage("Camera settings removed.")
+                                    load()
+                                    onReloadGate()
+                                }
+                                .onFailure {
+                                    cameraDeleting = false
+                                    cameraError = it.message ?: "Remove failed"
+                                }
+                        }
+                    },
+                ) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemoveCameras = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmDeleteSnapshots) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSnapshots = false },
+            title = { Text("Delete all saved snapshots?") },
+            text = { Text("Permanently deletes every saved picture and video for this gate. This cannot be undone. Transactions still in the backfill window get new pictures on the next snapshot run.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                    onClick = {
+                        confirmDeleteSnapshots = false
+                        cameraError = null
+                        cameraStatusMessage = null
+                        cameraDeleting = true
+                        scope.launch {
+                            runCatching {
+                                val res = api.deleteAllSnapshots(gatePhone)
+                                if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Delete failed"))
+                                res.body()
+                            }
+                                .onSuccess { reply ->
+                                    cameraDeleting = false
+                                    cameraTestResults = null
+                                    val files = reply?.files ?: 0
+                                    val minutes = reply?.minutes ?: 0
+                                    val summary = "Deleted $files file(s) across $minutes minute(s)."
+                                    cameraStatusMessage = summary
+                                    onMessage(summary)
+                                    load()
+                                    onReloadGate()
+                                }
+                                .onFailure {
+                                    cameraDeleting = false
+                                    cameraError = it.message ?: "Delete failed"
+                                }
+                        }
+                    },
+                ) { Text("Delete all") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteSnapshots = false }) { Text("Cancel") } },
         )
     }
 
@@ -794,95 +1045,62 @@ fun SystemSettingsScreen(
                     ) { Text("Add webhook") }
                 }
             }
-            // 6b. Camera Channels ↔ Relay Mapping
-            val camCfg = cameras
-            if (camCfg != null && cameraChannels.isNotEmpty()) {
-                item(key = "camera_channels", contentType = "section_cameras") {
-                    CollapsibleSection(
-                        title = "Camera Channels (${cameraChannels.size})",
-                        expanded = openCameras,
-                        onToggle = { openCameras = !openCameras },
-                        helpText = "Map each camera channel to specific gate relays so snapshots and clips only capture cameras watching the relay that fired. Leave none selected to record on all relays.",
-                    ) {
-                        cameraChannels.forEachIndexed { idx, ch ->
-                            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    StatusPill("Ch ${ch.channel}", tone = PillTone.Primary)
-                                    Text(
-                                        text = ch.name.ifBlank { "Channel ${ch.channel}" },
-                                        style = MaterialTheme.typography.titleSmall,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                }
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    FilterChip(
-                                        selected = ch.relays.isEmpty(),
-                                        onClick = { cameraChannels[idx] = ch.copy(relays = emptyList()) },
-                                        label = { Text("All relays") },
-                                    )
-                                    gateRelays.forEach { relay ->
-                                        val selected = relay in ch.relays
-                                        FilterChip(
-                                            selected = selected,
-                                            onClick = {
-                                                val next = if (selected) {
-                                                    ch.relays.filterNot { it == relay }
-                                                } else {
-                                                    (ch.relays + relay).distinct().sorted()
-                                                }
-                                                cameraChannels[idx] = ch.copy(relays = next)
-                                            },
-                                            label = { Text(relayDisplayName(prefs.relayLabels, relay)) },
-                                        )
-                                    }
-                                }
+            // 6b. Cameras (full recorder & channel configuration — always visible to admins)
+            item(key = "cameras", contentType = "section_cameras") {
+                val configuredCount = cameras?.channels?.size ?: 0
+                val cameraTitle = if (cameras != null) "Cameras ($configuredCount)" else "Cameras"
+                CollapsibleSection(
+                    title = cameraTitle,
+                    expanded = openCameras,
+                    onToggle = { openCameras = !openCameras },
+                    helpText = "A Dahua/Amcrest recorder reached through Dahua's P2P cloud. After each transactions pull, snapshots or 2-minute clips are saved for matching minutes and shown on Activity. Shared by every account managing this gate; the password is encrypted on the server.",
+                ) {
+                    CameraSettingsSection(
+                        form = cameraForm,
+                        hasSavedSettings = cameras != null,
+                        gateRelays = gateRelays,
+                        relayLabels = prefs.relayLabels,
+                        saving = cameraSaving,
+                        testing = cameraTesting,
+                        deleting = cameraDeleting,
+                        statusMessage = cameraStatusMessage,
+                        errorMessage = cameraError,
+                        testResults = cameraTestResults,
+                        onFormChange = { cameraForm = it },
+                        onSave = {
+                            if (shouldConfirmCameraRetention(cameras?.keepDays ?: 0, cameraForm.keepDays)) {
+                                confirmCameraRetention = true
+                            } else {
+                                performCameraSave()
                             }
-                        }
-                        Button(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                error = null
-                                scope.launch {
-                                    val channelsJson = JsonArray(
-                                        cameraChannels.map { ch ->
-                                            buildJsonObject {
-                                                put("channel", JsonPrimitive(ch.channel))
-                                                put("name", JsonPrimitive(ch.name))
-                                                put("relays", JsonArray(ch.relays.distinct().sorted().map { JsonPrimitive(it) }))
-                                            }
-                                        },
-                                    )
-                                    val body = buildJsonObject {
-                                        put("enabled", JsonPrimitive(camCfg.enabled))
-                                        put("serial", JsonPrimitive(camCfg.serial))
-                                        put("username", JsonPrimitive(camCfg.username))
-                                        put("mode", JsonPrimitive(camCfg.mode))
-                                        put("clockOffset", JsonPrimitive(camCfg.clockOffset))
-                                        put("frames", JsonPrimitive(camCfg.frames))
-                                        put("framesAfter", JsonPrimitive(camCfg.framesAfter))
-                                        put("clipTries", JsonPrimitive(camCfg.clipTries))
-                                        put("events", JsonPrimitive(camCfg.events))
-                                        put("backfillHours", JsonPrimitive(camCfg.backfillHours))
-                                        put("keepDays", JsonPrimitive(camCfg.keepDays))
-                                        put("channels", channelsJson)
-                                    }
-                                    runCatching {
-                                        val res = api.saveCameras(gatePhone, body)
-                                        if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Save failed"))
-                                    }
-                                        .onSuccess { onMessage("Camera relay mapping saved."); load(); onReloadGate() }
-                                        .onFailure { error = it.message ?: "Save failed" }
+                        },
+                        onTest = {
+                            cameraError = null
+                            cameraTestResults = null
+                            cameraStatusMessage = "Connecting to the recorder… (up to a minute)"
+                            cameraTesting = true
+                            scope.launch {
+                                runCatching {
+                                    val res = api.testCameras(gatePhone)
+                                    if (!res.isSuccessful) error(parseErr(res.errorBody()?.string(), res.code(), "Test failed"))
+                                    res.body()?.channels.orEmpty()
                                 }
-                            },
-                        ) { Text("Save camera relays") }
-                    }
+                                    .onSuccess { results ->
+                                        cameraTesting = false
+                                        cameraTestResults = results
+                                        val okCount = results.count { !it.file.isNullOrBlank() }
+                                        cameraStatusMessage = "Live pictures from $okCount of ${results.size} channel(s)."
+                                    }
+                                    .onFailure {
+                                        cameraTesting = false
+                                        cameraStatusMessage = null
+                                        cameraError = "Test failed: ${it.message ?: "Unable to connect"}"
+                                    }
+                            }
+                        },
+                        onRequestRemove = { confirmRemoveCameras = true },
+                        onRequestDeleteSnapshots = { confirmDeleteSnapshots = true },
+                    )
                 }
             }
         }
@@ -954,6 +1172,378 @@ fun SystemSettingsScreen(
             }
         }
     }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun CameraSettingsSection(
+    form: CameraFormState,
+    hasSavedSettings: Boolean,
+    gateRelays: List<Int>,
+    relayLabels: Map<String, String>,
+    saving: Boolean,
+    testing: Boolean,
+    deleting: Boolean,
+    statusMessage: String?,
+    errorMessage: String?,
+    testResults: List<CameraTestChannelDto>?,
+    onFormChange: (CameraFormState) -> Unit,
+    onSave: () -> Unit,
+    onTest: () -> Unit,
+    onRequestRemove: () -> Unit,
+    onRequestDeleteSnapshots: () -> Unit,
+) {
+    val busy = saving || testing || deleting
+    val isVideo = form.mode == "video"
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Save snapshots after transaction pulls",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = form.enabled,
+            onCheckedChange = { onFormChange(form.copy(enabled = it)) },
+        )
+    }
+
+    OutlinedTextField(
+        value = form.serial,
+        onValueChange = { onFormChange(form.copy(serial = it.take(32))) },
+        label = { Text("Recorder serial") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    OutlinedTextField(
+        value = form.username,
+        onValueChange = { onFormChange(form.copy(username = it.take(64))) },
+        label = { Text("Recorder username") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    PasswordOutlinedField(
+        value = form.password,
+        onValueChange = { onFormChange(form.copy(password = it)) },
+        label = if (hasSavedSettings) "Recorder password (blank keeps saved)" else "Recorder password",
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    OutlinedTextField(
+        value = form.clockOffset,
+        onValueChange = { raw ->
+            val filtered = raw.filterIndexed { idx, ch -> ch.isDigit() || (ch == '-' && idx == 0) }.take(6)
+            onFormChange(form.copy(clockOffset = filtered))
+        },
+        label = { Text("Clock offset (seconds)") },
+        supportingText = { Text("Added to the gate's transaction time to match the recorder's clock.") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Capture mode", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier.fillMaxWidth(),
+            space = 2.dp,
+        ) {
+            CAMERA_MODE_OPTIONS.forEachIndexed { idx, (modeValue, label) ->
+                SegmentedButton(
+                    selected = form.mode == modeValue,
+                    onClick = { onFormChange(form.copy(mode = modeValue)) },
+                    shape = SegmentedButtonDefaults.itemShape(index = idx, count = CAMERA_MODE_OPTIONS.size),
+                    border = NO_SEGMENT_BORDER,
+                    colors = SegmentedButtonDefaults.colors(
+                        inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+                        activeBorderColor = Color.Transparent,
+                        inactiveBorderColor = Color.Transparent,
+                    ),
+                    label = { Text(label, maxLines = 1) },
+                )
+            }
+        }
+    }
+
+    if (!isVideo) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Frames per transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CAMERA_FRAME_OPTIONS.forEach { count ->
+                    FilterChip(
+                        selected = form.frames == count,
+                        onClick = { onFormChange(form.copy(frames = count)) },
+                        label = { Text(count.toString()) },
+                    )
+                }
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Frames after the minute", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CAMERA_FRAMES_AFTER_OPTIONS.forEach { count ->
+                    FilterChip(
+                        selected = form.framesAfter == count,
+                        onClick = { onFormChange(form.copy(framesAfter = count)) },
+                        label = { Text(count.toString()) },
+                    )
+                }
+            }
+        }
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Video tries", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CAMERA_CLIP_TRIES_OPTIONS.forEach { tries ->
+                    FilterChip(
+                        selected = form.clipTries == tries,
+                        onClick = { onFormChange(form.copy(clipTries = tries)) },
+                        label = { Text(tries.toString()) },
+                    )
+                }
+            }
+            Text(
+                text = "Saves 2-minute clips at full recorder quality from the start of each matching minute.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Transactions to capture", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            CAMERA_EVENT_OPTIONS.forEach { (eventValue, label) ->
+                FilterChip(
+                    selected = form.events == eventValue,
+                    onClick = { onFormChange(form.copy(events = eventValue)) },
+                    label = { Text(label) },
+                )
+            }
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Keep snapshots", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            CAMERA_KEEP_DAYS_OPTIONS.forEach { (days, label) ->
+                FilterChip(
+                    selected = form.keepDays == days,
+                    onClick = { onFormChange(form.copy(keepDays = days)) },
+                    label = { Text(label) },
+                )
+            }
+        }
+    }
+
+    OutlinedTextField(
+        value = form.backfillHours,
+        onValueChange = { raw ->
+            onFormChange(form.copy(backfillHours = raw.filter(Char::isDigit).take(3)))
+        },
+        label = { Text("Backfill window (hours)") },
+        supportingText = { Text("0–720 hours to look back when pulling transactions.") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Channels (${form.channels.size}/$MAX_CAMERA_CHANNELS)",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        form.channels.forEachIndexed { idx, row ->
+            val canRemove = form.channels.size > 1
+            BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = row.channel,
+                        onValueChange = { raw ->
+                            val updated = form.channels.toMutableList()
+                            updated[idx] = row.copy(channel = raw.filter(Char::isDigit).take(2))
+                            onFormChange(form.copy(channels = updated))
+                        },
+                        label = { Text("Ch #") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.width(80.dp),
+                    )
+                    OutlinedTextField(
+                        value = row.name,
+                        onValueChange = { raw ->
+                            val updated = form.channels.toMutableList()
+                            updated[idx] = row.copy(name = raw.take(40))
+                            onFormChange(form.copy(channels = updated))
+                        },
+                        label = { Text("Camera name") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(
+                        enabled = canRemove,
+                        onClick = {
+                            val updated = form.channels.toMutableList()
+                            updated.removeAt(idx)
+                            onFormChange(form.copy(channels = updated))
+                        },
+                    ) {
+                        Icon(
+                            Icons.Rounded.Delete,
+                            contentDescription = "Remove channel row ${idx + 1}",
+                            tint = if (canRemove) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                            },
+                        )
+                    }
+                }
+                if (gateRelays.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        FilterChip(
+                            selected = row.relays.isEmpty(),
+                            onClick = {
+                                val updated = form.channels.toMutableList()
+                                updated[idx] = row.copy(relays = emptyList())
+                                onFormChange(form.copy(channels = updated))
+                            },
+                            label = { Text("All relays") },
+                        )
+                        gateRelays.forEach { relay ->
+                            val selected = relay in row.relays
+                            FilterChip(
+                                selected = selected,
+                                onClick = {
+                                    val nextRelays = if (selected) {
+                                        row.relays.filterNot { it == relay }
+                                    } else {
+                                        (row.relays + relay).distinct().sorted()
+                                    }
+                                    val updated = form.channels.toMutableList()
+                                    updated[idx] = row.copy(relays = nextRelays)
+                                    onFormChange(form.copy(channels = updated))
+                                },
+                                label = { Text(relayDisplayName(relayLabels, relay)) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (form.channels.size < MAX_CAMERA_CHANNELS) {
+            OutlinedButton(
+                onClick = {
+                    onFormChange(form.copy(channels = form.channels + CameraChannelFormRow()))
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("Add channel")
+            }
+        }
+    }
+
+    Button(
+        onClick = onSave,
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (saving) {
+            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+            Text("Saving…")
+        } else {
+            Text("Save camera settings")
+        }
+    }
+
+    FilledTonalButton(
+        onClick = onTest,
+        enabled = hasSavedSettings && !busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (testing) {
+            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+            Text("Testing cameras…")
+        } else {
+            Text("Test cameras")
+        }
+    }
+
+    OutlinedButton(
+        onClick = onRequestRemove,
+        enabled = hasSavedSettings && !busy,
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Remove camera settings")
+    }
+
+    OutlinedButton(
+        onClick = onRequestDeleteSnapshots,
+        enabled = hasSavedSettings && !busy,
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Delete all snapshots")
+    }
+
+    if (!statusMessage.isNullOrBlank()) {
+        Text(
+            text = statusMessage,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    if (!errorMessage.isNullOrBlank()) {
+        ErrorBanner(errorMessage)
+    }
+
+    if (!testResults.isNullOrEmpty()) {
+        BubbleCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+            Text("Test results", style = MaterialTheme.typography.titleSmall)
+            testResults.forEach { ch ->
+                val ok = !ch.file.isNullOrBlank()
+                val label = ch.name.ifBlank { "Channel ${ch.channel}" }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatusPill(
+                        text = if (ok) "Ch ${ch.channel} OK" else "Ch ${ch.channel} Error",
+                        tone = if (ok) PillTone.Success else PillTone.Error,
+                    )
+                    Text(
+                        text = if (ok) "$label (${ch.file})" else "$label: ${ch.error?.ifBlank { "Failed" } ?: "Failed"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
     }
 }
 
